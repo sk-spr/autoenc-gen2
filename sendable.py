@@ -23,6 +23,8 @@ from torch.utils.data import DataLoader, dataloader
 from torch.utils.tensorboard import SummaryWriter
 
 
+CURR_FIGURE=None
+
 def load_tile(fname, device):
     im = (np.array(Image.open(fname).get_flattened_data()).reshape(1, image_size, image_size)).astype(np.float32)
     min_val = np.amin(im).astype(np.float32)
@@ -38,6 +40,11 @@ def get_im(tensor):
     image = image.squeeze(0)      # remove the fake batch dimension
     return unloader(image)
 def imshow(tensorA, tensorB, title=None):
+    global CURR_FIGURE
+
+    if CURR_FIGURE:
+        try: plt.close(CURR_FIGURE)
+        except: print("e")
     fig, ax = plt.subplots(1,2)
     ax[0].imshow(get_im(tensorA * 0.5 + 0.5))
     ax[1].imshow(get_im(tensorB * 0.5 + 0.5))
@@ -45,6 +52,7 @@ def imshow(tensorA, tensorB, title=None):
     if title is not None:
         ax[0].title(title)
     fig.show()
+    CURR_FIGURE = fig
 
 
 class HeightTileDataset(torch.utils.data.Dataset):
@@ -131,7 +139,7 @@ def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Mo
                 print(f"[{int(batch / (len(data_files) / batch_size) * 100):>2d}%]Batch {batch:0>5} ({batch * batch_size} images procd) - loss {calculated_loss}")
                 loss_nums.append(calculated_loss.item())
             if batch % 100 == 0:
-                disp_im = load_tile(data_files[random.range(0, len(data_files))], device)
+                disp_im = load_tile(data_files[random.randrange(0, len(data_files))], device)
                 imshow(disp_im.squeeze(0), model(disp_im.squeeze(0)))
             if batch * batch_size > stop:
                 break
@@ -163,13 +171,14 @@ def test(dataloader: DataLoader, mod: nn.Module, loss: nn.Module):
     return test_loss
 
 if __name__ == '__main__':
+    CURR_FIGURE = None
     print("is_main")
     freeze_support()
     torch.multiprocessing.set_start_method('spawn')
     board_writer = SummaryWriter("./runs/")
 
     # possible batch sizes to test
-    batch_options = [256, 1024, 2048]
+    batch_options = [256, 512, 1024]
     # possible learning rates
     learning_rate_candidates = [1e-5, 1e-4, 1e-3]
 
@@ -219,7 +228,7 @@ if __name__ == '__main__':
 
 
             data_loader = torch.utils.data.DataLoader(
-                HeightTileDataset(data_files[:1024*128], device),
+                HeightTileDataset(data_files[:1024*32], device),
                 batch_size=batch_size_candidate,  # first dimension of matrices sent,
                 shuffle=True,  # randomize order
                 generator=torch.Generator(device),  # load to GPU
@@ -239,7 +248,7 @@ if __name__ == '__main__':
                 optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
                 before_train = time.time_ns()
                 base_loss = 1.0
-                train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, 0, 1024*128)
+                train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, 0, 1024*32)
                 train_duration = time.time_ns() - before_train
                 metaparam_data.append((learning_rate_candidate, batch_size_candidate, train_losses[0] - train_losses[-1], train_duration))
                 print(metaparam_data[-1])
@@ -251,8 +260,8 @@ if __name__ == '__main__':
         batch_size = improvement_scaled[0][1]
         current_learning_rate = improvement_scaled[0][0]  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
     else:
-        current_learning_rate = 1e-4
-        batch_size = 512
+        current_learning_rate = 1e-5
+        batch_size = 1024
         model = orig_model.cuda(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
     data_loader = torch.utils.data.DataLoader(
@@ -260,9 +269,9 @@ if __name__ == '__main__':
         batch_size=batch_size,  # first dimension of matrices sent,
         shuffle=True,  # randomize order
         generator=torch.Generator(device),  # load to GPU
-        num_workers=12,
+        num_workers=3,
         # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
-        prefetch_factor=16,  # increase like num_workers, same reasons
+        prefetch_factor=1,  # increase like num_workers, same reasons
         pin_memory=False,  # would not work with parallelisation...
         persistent_workers=True)  # make workers resident
     for i in range(100):
@@ -291,10 +300,14 @@ if __name__ == '__main__':
             loss_hist.append(test_losses)
             fig, axes = plt.subplots(1, 2)
             fname = glob.glob(f"{tile_folder}")[random.randrange(0,len(data_files))]
+            if CURR_FIGURE:
+                try: plt.close(CURR_FIGURE)
+                except: print("e")
             axes[0].imshow(get_im(load_tile(fname, device)[0] * 0.5 + 0.5))
             axes[1].imshow(get_im(model(load_tile(fname, device))[0] * 0.5+0.5))
             board_writer.add_scalar("LearningRate", current_learning_rate, global_step=i * 3 + j + 1)
             board_writer.add_figure("CurrentResult", figure= fig,global_step=i * 3 + j + 1)
+            CURR_FIGURE = fig
             board_writer.flush()
         # save full model (encode+decode, need class definition to load, but weights are saved)
         # should be 24.0MiB
