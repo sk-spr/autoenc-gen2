@@ -30,7 +30,7 @@ def load_tile(fname, device):
     min_val = np.amin(im).astype(np.float32)
     max_val = np.amax(im).astype(np.float32)
     #print(max_val - min_val)
-    return torch.from_numpy((im - min_val) / (max(max_val - min_val, 0.1)) * 2.0 - 1.0).unsqueeze(0).to(device, torch.float)
+    return torch.from_numpy((im - min_val) / (max(max_val - min_val, 1))).unsqueeze(0).to(device, torch.float)
 
 unloader = transforms.ToPILImage()  # reconvert into PIL image
 
@@ -46,8 +46,8 @@ def imshow(tensorA, tensorB, title=None):
         try: plt.close(CURR_FIGURE)
         except: print("e")
     fig, ax = plt.subplots(1,2)
-    ax[0].imshow(get_im(tensorA * 0.5 + 0.5))
-    ax[1].imshow(get_im(tensorB * 0.5 + 0.5))
+    ax[0].imshow(get_im(tensorA))
+    ax[1].imshow(get_im(tensorB))
 
     if title is not None:
         ax[0].title(title)
@@ -84,28 +84,30 @@ class EncNet(nn.Module):
         # encoder: image -> latent_dims * 4 bytes
         self.encoder = nn.Sequential(
             nn.Conv2d(1, 4, ksize, stride=stride, padding=padding), # output is shape (4,128,128)
-            nn.Sigmoid(),
+            nn.LeakyReLU(),
             nn.Conv2d(4, 1, ksize*2, stride=stride*2, padding=padding*2), # output is shape (1, 64, 64)
-            nn.Sigmoid(),
+            nn.LeakyReLU(),
             nn.Flatten(),
             nn.Linear(1 * 32 * 32, deep_n),
-            nn.Sigmoid(),
+            nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
-            nn.Sigmoid(),
-            nn.Linear(deep_n, latent_dims)
+            nn.LeakyReLU(),
+            nn.Linear(deep_n, latent_dims),
+            nn.LeakyReLU()
         )
         # decoder is pretty directly mirror, but trained independently
         self.decoder = nn.Sequential(
             nn.Linear(latent_dims, deep_n),
-            nn.Sigmoid(),
+            nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
-            nn.Sigmoid(),
+            nn.LeakyReLU(),
             nn.Linear(deep_n, 1*32*32),
             nn.Unflatten(1, torch.Size((1, 32, 32))),
-            nn.Sigmoid(),
+            nn.LeakyReLU(),
             nn.ConvTranspose2d(1, 4, ksize*2,stride=stride*2,padding=padding*2),
-            nn.Sigmoid(),
+            nn.LeakyReLU(),
             nn.ConvTranspose2d(4, 1, ksize, stride=stride, padding=padding),
+            nn.ReLU()
         )
     def forward(self, x):
         #print(x.shape)
@@ -117,7 +119,7 @@ class EncNet(nn.Module):
 
 def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Module, opt: torch.optim.Optimizer, writer: SummaryWriter, starti, stop=425414):
     loss_nums = []
-    subcycles = 4
+    subcycles = 2
     for i in range(subcycles): # increase number of per-epoch cycles if training is over too quickly before reloading to test
         mod.train()
         for batch, x in enumerate(dataloader):
@@ -131,14 +133,12 @@ def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Mo
 
             calculated_loss.backward()
             opt.step()
-            writer.add_scalar("Loss/TrainFine", calculated_loss.item(), starti + int(batch / (len(data_files) / batch_size) * 100))
+            writer.add_scalar("Loss/TrainFine", calculated_loss.item(), starti + i * 100 + int(batch / (len(data_files) / batch_size) * 100))
             writer.flush()
             if batch % 10 == 0:
-                opt.zero_grad()
-
                 print(f"[{int(batch / (len(data_files) / batch_size) * 100):>2d}%]Batch {batch:0>5} ({batch * batch_size} images procd) - loss {calculated_loss}")
                 loss_nums.append(calculated_loss.item())
-            if batch % 100 == 0:
+            if batch % 50 == 0:
                 disp_im = load_tile(data_files[random.randrange(0, len(data_files))], device)
                 imshow(disp_im.squeeze(0), model(disp_im.squeeze(0)))
             if batch * batch_size > stop:
@@ -183,7 +183,7 @@ if __name__ == '__main__':
     learning_rate_candidates = [1e-5, 1e-4, 1e-3]
 
     # set the glob expression for the input tif tiles
-    tile_folder = "data/tiles/15/*/*.tif"
+    tile_folder = "/home/skye/data/switzerland_tiles/16/*/*.tif"
     zoom_level = "**"
     data_files = glob.glob(tile_folder)
     print(f"{len(data_files)} raw files")
@@ -260,8 +260,8 @@ if __name__ == '__main__':
         batch_size = improvement_scaled[0][1]
         current_learning_rate = improvement_scaled[0][0]  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
     else:
-        current_learning_rate = 1e-5
-        batch_size = 1024
+        current_learning_rate = 5e-6
+        batch_size = 256
         model = orig_model.cuda(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
     data_loader = torch.utils.data.DataLoader(
@@ -269,9 +269,8 @@ if __name__ == '__main__':
         batch_size=batch_size,  # first dimension of matrices sent,
         shuffle=True,  # randomize order
         generator=torch.Generator(device),  # load to GPU
-        num_workers=3,
-        # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
-        prefetch_factor=1,  # increase like num_workers, same reasons
+        num_workers=12, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
+        prefetch_factor=20,  # increase like num_workers, same reasons
         pin_memory=False,  # would not work with parallelisation...
         persistent_workers=True)  # make workers resident
     for i in range(100):
@@ -290,7 +289,7 @@ if __name__ == '__main__':
         for j in range(train_iter_per_epoch):
             print(f"-------------\n[[{int(j/train_iter_per_epoch * 100.0):>2d}%]]\n-----------")
             tick = time.time()
-            train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, i * 3 + j * 100, len(data_files))
+            train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, (i * 3 + j) * 300, len(data_files))
             time_full_train = (time.time() - tick) / len(data_files)
             print(f"average {(time_full_train * 1000):2<5f}ms training time per image (approx)")
             loss_hist = loss_hist + train_losses
@@ -303,8 +302,8 @@ if __name__ == '__main__':
             if CURR_FIGURE:
                 try: plt.close(CURR_FIGURE)
                 except: print("e")
-            axes[0].imshow(get_im(load_tile(fname, device)[0] * 0.5 + 0.5))
-            axes[1].imshow(get_im(model(load_tile(fname, device))[0] * 0.5+0.5))
+            axes[0].imshow(get_im(load_tile(fname, device)[0]))
+            axes[1].imshow(get_im(model(load_tile(fname, device))[0]))
             board_writer.add_scalar("LearningRate", current_learning_rate, global_step=i * 3 + j + 1)
             board_writer.add_figure("CurrentResult", figure= fig,global_step=i * 3 + j + 1)
             CURR_FIGURE = fig
