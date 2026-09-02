@@ -1,7 +1,7 @@
-# Anleitung
-1. Folder speichern, wo du optimalerweise 100gb+ frei hast
-2. `bash ./download_at_dtm.sh` um das 5M DGM GeoTiff herunterzuladen und umzuprojizieren (setzt $GEOTIFF_FILE automatisch für den dritten schritt)
-3. `bash ./create_tiles.sh` generiert die einzelnen files für die 256x256 tiles
-4. `poetry env use <path-to-python3.13>` Poetry environment, sollte hoffentlich alle dependencies haben
-5. `poetry install` dependency-Installation
-6. `python sendable.py`
+# Training Instructions
+1. Save repository in a location with 100GB of free space
+2. `bash ./download_at_dtm.sh` to download and prepare 5m-resolution GeoTIFF for Austria and set $GEOTIFF_FILE
+3. `bash ./create_tiles.sh` to generate individual .tif files for each tile in data/tiles
+4. `poetry env use <path-to-python3.13>` Poetry project should include all dependencies, python 3.13.15 used in testing
+5. `poetry install` dependency installation
+6. `bash train.sh` train with automatically guessed hyperparameters, and start tensorboard
