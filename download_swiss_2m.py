@@ -55,7 +55,7 @@ if __name__ == "__main__":
     if not os.path.exists(f"{data_folder}/switzerland_tiles"):
         os.mkdir(f"{data_folder}/switzerland_tiles")
 
-        subprocess.run(f"gdal raster tile -i {data_folder}/swit_2m_proj.tif -f GTiff -o {data_folder}/switzerland_tiles --tiling-scheme WebMercatorQuad --max-zoom 16 --tile-size 256 --skip-blank --resume --parallel-method spawn --no-alpha".split(" "))
+        subprocess.run(f"gdal raster tile -i {data_folder}/swit_2m_proj.tif -f GTiff -o {data_folder}/switzerland_tiles --tiling-scheme WebMercatorQuad --max-zoom 18 --tile-size 256 --skip-blank --resume --parallel-method spawn --no-alpha".split(" "))
 
     print("done, delete unprojected TIFF? (y/N)")
     if input("Type \"y\" to confirm, \"n\" to deny: >") == "y":

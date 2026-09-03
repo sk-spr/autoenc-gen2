@@ -220,7 +220,7 @@ if __name__ == '__main__':
         persistent_workers=False) # make workers resident
     print("finding appropriate metaparameters")
     metaparam_data = []
-    autodetect_metaparameters = True
+    autodetect_metaparameters = False
     autodetect_n_img = 1024*48
     if autodetect_metaparameters:
         losses = {}
@@ -277,13 +277,13 @@ if __name__ == '__main__':
         metaparam_data.sort(key=lambda x: x[2])
 
         print([f"LR {r[0]}, Batch Size {r[1]}: Improved by {r[2]} with variance {r[4]} in {r[3]} seconds\n" for r in metaparam_data])
-        improvement_scaled = [((l[0], l[1], (l[2]) / l[3]) * 100) / l[4] for l in metaparam_data]
+        improvement_scaled = [(l[0], l[1], (l[2] / l[3]) * 100 / l[4]) for l in metaparam_data]
         for batch_size_candidate in batch_options:
             print(f"Results for batch size {batch_size_candidate}")
             for learning_rate_candidate in learning_rate_candidates:
                 datum = [row for row in improvement_scaled if row[0] == learning_rate_candidate and row[1] == batch_size_candidate][0]
                 print(f"[{batch_size_candidate}-batches at LR {learning_rate_candidate}]: score={datum[2]}")
-        improvement_scaled.sort(key=lambda x: x[2], reverse=True)
+        improvement_scaled.sort(key=lambda x: x[2], reverse=False)
 
         print(improvement_scaled)
         batch_size = improvement_scaled[0][1]
