@@ -84,26 +84,26 @@ class EncNet(nn.Module):
         # encoder: image -> latent_dims * 4 bytes
         self.encoder = nn.Sequential(
             nn.Conv2d(1, 1, ksize, stride=stride, padding=padding), # output is shape (4,128,128)
-            nn.LeakyReLU(),
+            nn.Sigmoid(),
             nn.Flatten(),
             nn.Linear(128 * 128, deep_n),
-            nn.LeakyReLU(),
+            nn.Sigmoid(),
             nn.Linear(deep_n, deep_n),
-            nn.LeakyReLU(),
+            nn.Sigmoid(),
             nn.Linear(deep_n, latent_dims),
-            nn.LeakyReLU()
+            nn.Sigmoid()
         )
         # decoder is pretty directly mirror, but trained independently
         self.decoder = nn.Sequential(
             nn.Linear(latent_dims, deep_n),
-            nn.LeakyReLU(),
+            nn.Sigmoid(),
             nn.Linear(deep_n, deep_n),
-            nn.LeakyReLU(),
+            nn.Sigmoid(),
             nn.Linear(deep_n, 128 * 128),
-            nn.LeakyReLU(),
+            nn.Sigmoid(),
             nn.Unflatten(1, torch.Size((1, 128, 128))),
             nn.ConvTranspose2d(1, 1, ksize, stride=stride, padding=padding),
-            nn.LeakyReLU()
+            nn.Sigmoid()
         )
     def forward(self, x: Tensor):
         #print(x.shape)
@@ -203,7 +203,7 @@ if __name__ == '__main__':
     model = EncNet().to(device)
 
     # uncomment and adjust path to load checkpointed model
-    model = torch.load("./models/height5_ep0.pt2", weights_only=False).to(device)
+    #model = torch.load("./models/height5_ep1.pt2", weights_only=False).to(device)
 
     orig_model = model.cpu()
 
@@ -292,7 +292,7 @@ if __name__ == '__main__':
         batch_size = improvement_scaled[0][1]
         current_learning_rate = improvement_scaled[0][0]  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
     else:
-        current_learning_rate = 1e-7
+        current_learning_rate = 1e-5
         batch_size = 8192
         model = orig_model.cuda(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
@@ -344,7 +344,7 @@ if __name__ == '__main__':
             board_writer.flush()
         # save full model (encode+decode, need class definition to load, but weights are saved)
         # should be 24.0MiB
-        torch.save(model, f"models/height5_ep{i}.pt2")
+        torch.save(model, f"models/height6_ep{i}.pt2")
         fig, ax = plt.subplots(1,1)
         ax.plot(loss_hist)
         fig.show()
