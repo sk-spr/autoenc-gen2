@@ -1,3 +1,6 @@
 models/*.pt2
 runs/*
 /.idea/
+data/**/*.tif
+/.vscode-server/
+*.vrt
