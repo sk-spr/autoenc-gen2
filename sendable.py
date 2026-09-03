@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 
 import torchvision.transforms as transforms
 
-from torch import nn
+from torch import nn, Tensor
 from torch.utils.data import DataLoader, dataloader
 from torch.utils.tensorboard import SummaryWriter
 
@@ -83,12 +83,10 @@ class EncNet(nn.Module):
         super().__init__()
         # encoder: image -> latent_dims * 4 bytes
         self.encoder = nn.Sequential(
-            nn.Conv2d(1, 4, ksize, stride=stride, padding=padding), # output is shape (4,128,128)
-            nn.LeakyReLU(),
-            nn.Conv2d(4, 1, ksize*2, stride=stride*2, padding=padding*2), # output is shape (1, 64, 64)
+            nn.Conv2d(1, 1, ksize, stride=stride, padding=padding), # output is shape (4,128,128)
             nn.LeakyReLU(),
             nn.Flatten(),
-            nn.Linear(1 * 32 * 32, deep_n),
+            nn.Linear(128 * 128, deep_n),
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
@@ -101,15 +99,13 @@ class EncNet(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
-            nn.Linear(deep_n, 1*32*32),
-            nn.Unflatten(1, torch.Size((1, 32, 32))),
+            nn.Linear(deep_n, 128 * 128),
             nn.LeakyReLU(),
-            nn.ConvTranspose2d(1, 4, ksize*2,stride=stride*2,padding=padding*2),
-            nn.LeakyReLU(),
-            nn.ConvTranspose2d(4, 1, ksize, stride=stride, padding=padding),
-            nn.ReLU()
+            nn.Unflatten(1, torch.Size((1, 128, 128))),
+            nn.ConvTranspose2d(1, 1, ksize, stride=stride, padding=padding),
+            nn.LeakyReLU()
         )
-    def forward(self, x):
+    def forward(self, x: Tensor):
         #print(x.shape)
         encoded = self.encoder(x)
         #print(encoded.shape)
@@ -117,7 +113,7 @@ class EncNet(nn.Module):
         #print(decoded.shape)
         return decoded
 
-def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Module, opt: torch.optim.Optimizer, writer: SummaryWriter, starti, stop=425414):
+def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Module, opt: torch.optim.Optimizer, writer: SummaryWriter, starti, stop=99999999, write_tensorboard=True):
     loss_nums = []
     subcycles = 2
     for i in range(subcycles): # increase number of per-epoch cycles if training is over too quickly before reloading to test
@@ -133,12 +129,15 @@ def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Mo
 
             calculated_loss.backward()
             opt.step()
-            writer.add_scalar("Loss/TrainFine", calculated_loss.item(), starti + i * 100 + int(batch / (len(data_files) / batch_size) * 100))
-            writer.flush()
+            loss_nums.append(calculated_loss.item())
+
+
+            if write_tensorboard:
+                writer.add_scalar("Loss/TrainFine", calculated_loss.item(), starti + i * (len(data_files) / batch_size) + batch)
+                writer.flush()
             if batch % 10 == 0:
                 print(f"[{int(batch / (len(data_files) / batch_size) * 100):>2d}%]Batch {batch:0>5} ({batch * batch_size} images procd) - loss {calculated_loss}")
-                loss_nums.append(calculated_loss.item())
-            if batch % 50 == 0:
+            if batch % math.floor(50000/batch_size) == 0:
                 disp_im = load_tile(data_files[random.randrange(0, len(data_files))], device)
                 imshow(disp_im.squeeze(0), model(disp_im.squeeze(0)))
             if batch * batch_size > stop:
@@ -178,9 +177,9 @@ if __name__ == '__main__':
     board_writer = SummaryWriter("./runs/")
 
     # possible batch sizes to test
-    batch_options = [256, 512, 1024]
+    batch_options = [128, 256, 512]
     # possible learning rates
-    learning_rate_candidates = [1e-5, 1e-4, 1e-3]
+    learning_rate_candidates = [1e-6, 1e-5]
 
     # set the glob expression for the input tif tiles
     tile_folder = "/home/skye/data/switzerland_tiles/16/*/*.tif"
@@ -201,7 +200,7 @@ if __name__ == '__main__':
     model = EncNet().to(device)
 
     # uncomment and adjust path to load checkpointed model
-    #model = torch.load("./models/height4_ep0.pt2", weights_only=False).to(device)
+    #model = torch.load("./models/height5_ep2.pt2", weights_only=False).to(device)
 
     orig_model = model.cpu()
 
@@ -221,20 +220,23 @@ if __name__ == '__main__':
         persistent_workers=False) # make workers resident
     print("finding appropriate metaparameters")
     metaparam_data = []
-    autodetect_metaparameters = False
+    autodetect_metaparameters = True
+    autodetect_n_img = 1024*48
     if autodetect_metaparameters:
+        losses = {}
+
         for batch_size_candidate in batch_options:
-            print(f"Trying {batch_size_candidate} batches...")
+            print(f"Trying batches with n={batch_size_candidate} ...")
 
 
             data_loader = torch.utils.data.DataLoader(
-                HeightTileDataset(data_files[:1024*32], device),
+                HeightTileDataset(data_files[:autodetect_n_img], device),
                 batch_size=batch_size_candidate,  # first dimension of matrices sent,
                 shuffle=True,  # randomize order
                 generator=torch.Generator(device),  # load to GPU
                 num_workers=4,
                 # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
-                prefetch_factor=2,  # increase like num_workers, same reasons
+                prefetch_factor=1,  # increase like num_workers, same reasons
                 pin_memory=False,  # would not work with parallelisation...
                 persistent_workers=False)  # make workers resident
             for learning_rate_candidate in learning_rate_candidates:
@@ -246,21 +248,48 @@ if __name__ == '__main__':
 
                 current_learning_rate = learning_rate_candidate  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
                 optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
-                before_train = time.time_ns()
-                base_loss = 1.0
-                train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, 0, 1024*32)
-                train_duration = time.time_ns() - before_train
-                metaparam_data.append((learning_rate_candidate, batch_size_candidate, train_losses[0] - train_losses[-1], train_duration))
+                before_train = time.time()
+                train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, 0, autodetect_n_img, False)
+                train_duration = time.time() - before_train
+
+                curve_fit_x = np.linspace(0, len(train_losses), len(train_losses))
+                curve_fit_y = np.array(train_losses)
+                fitted_poly = np.polyfit(curve_fit_x, curve_fit_y, 3)
+                curve_points = np.poly1d(fitted_poly)(curve_fit_x)
+                delta_real_fit = np.square(curve_points - curve_fit_y)
+                f, a = plt.subplots(2,1)
+                a[0].plot(curve_fit_y, color="red")
+                a[0].plot(curve_points, color="green")
+                a[1].plot(delta_real_fit)
+                f.show()
+                print(float(np.mean(delta_real_fit)))
+                mean_start = float(np.mean(np.array(train_losses[:5])))
+                mean_end = float(np.mean(np.array(train_losses[-5:])))
+                metaparam_data.append((learning_rate_candidate, batch_size_candidate,mean_end - mean_start, train_duration, float(np.mean(delta_real_fit))))
                 print(metaparam_data[-1])
+                losses[f"lr_{learning_rate_candidate}_bs_{batch_size_candidate}"] = train_losses
+                print(f"LR {learning_rate_candidate}, Batch Size {batch_size_candidate}: Improved by {mean_end - mean_start} with variance {float(np.mean(delta_real_fit))} in {train_duration} seconds")
+                data = train_losses
+                for datum_i in range(len(data)):
+                    board_writer.add_scalar(f"Loss/Meta/lr_{learning_rate_candidate}_bs_{batch_size_candidate}", data[datum_i], datum_i)
+
+                    board_writer.flush()
         metaparam_data.sort(key=lambda x: x[2])
-        print(metaparam_data)
-        improvement_scaled = [(l[0], l[1], (1-l[2]) / l[3]) for l in metaparam_data]
+
+        print([f"LR {r[0]}, Batch Size {r[1]}: Improved by {r[2]} with variance {r[4]} in {r[3]} seconds\n" for r in metaparam_data])
+        improvement_scaled = [((l[0], l[1], (l[2]) / l[3]) * 100) / l[4] for l in metaparam_data]
+        for batch_size_candidate in batch_options:
+            print(f"Results for batch size {batch_size_candidate}")
+            for learning_rate_candidate in learning_rate_candidates:
+                datum = [row for row in improvement_scaled if row[0] == learning_rate_candidate and row[1] == batch_size_candidate][0]
+                print(f"[{batch_size_candidate}-batches at LR {learning_rate_candidate}]: score={datum[2]}")
         improvement_scaled.sort(key=lambda x: x[2], reverse=True)
+
         print(improvement_scaled)
         batch_size = improvement_scaled[0][1]
         current_learning_rate = improvement_scaled[0][0]  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
     else:
-        current_learning_rate = 5e-6
+        current_learning_rate = 1e-5
         batch_size = 256
         model = orig_model.cuda(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
@@ -269,8 +298,8 @@ if __name__ == '__main__':
         batch_size=batch_size,  # first dimension of matrices sent,
         shuffle=True,  # randomize order
         generator=torch.Generator(device),  # load to GPU
-        num_workers=12, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
-        prefetch_factor=20,  # increase like num_workers, same reasons
+        num_workers=6, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
+        prefetch_factor=4,  # increase like num_workers, same reasons
         pin_memory=False,  # would not work with parallelisation...
         persistent_workers=True)  # make workers resident
     for i in range(100):
@@ -289,8 +318,8 @@ if __name__ == '__main__':
         for j in range(train_iter_per_epoch):
             print(f"-------------\n[[{int(j/train_iter_per_epoch * 100.0):>2d}%]]\n-----------")
             tick = time.time()
-            train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, (i * 3 + j) * 300, len(data_files))
-            time_full_train = (time.time() - tick) / len(data_files)
+            train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, (i * 3 + j) * 2 * (len(data_files) / batch_size), len(data_files))
+            time_full_train = (time.time() - tick) / (len(data_files) * 2) # FIXME pull this scalar from the same place as train() subepoch count
             print(f"average {(time_full_train * 1000):2<5f}ms training time per image (approx)")
             loss_hist = loss_hist + train_losses
             test_losses = test(data_loader, model, loss_fn)
@@ -315,6 +344,6 @@ if __name__ == '__main__':
         ax.plot(loss_hist)
         fig.show()
 
-        if i % 2 == 0:
-            current_learning_rate *= 2
+        if i % 4 == 0:
+            current_learning_rate *= 1.3
             optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
