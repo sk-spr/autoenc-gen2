@@ -203,7 +203,7 @@ if __name__ == '__main__':
     model = EncNet().to(device)
 
     # uncomment and adjust path to load checkpointed model
-    model = torch.load("./models/height5_ep1.pt2", weights_only=False).to(device)
+    model = torch.load("./models/height5_ep0.pt2", weights_only=False).to(device)
 
     orig_model = model.cpu()
 
@@ -292,7 +292,7 @@ if __name__ == '__main__':
         batch_size = improvement_scaled[0][1]
         current_learning_rate = improvement_scaled[0][0]  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
     else:
-        current_learning_rate = 3e-6
+        current_learning_rate = 1e-7
         batch_size = 8192
         model = orig_model.cuda(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
@@ -329,15 +329,17 @@ if __name__ == '__main__':
             board_writer.add_scalar("Loss/test", test_losses, i * train_iter_per_epoch + j + 1 )
             board_writer.flush()
             loss_hist.append(test_losses)
-            fig, axes = plt.subplots(1, 2)
-            fname = glob.glob(f"{tile_folder}")[random.randrange(0,len(data_files))]
-            if CURR_FIGURE:
-                try: plt.close(CURR_FIGURE)
-                except: print("e")
-            axes[0].imshow(get_im(load_tile(fname, device)[0]))
-            axes[1].imshow(get_im(model(load_tile(fname, device))[0]))
+            
             board_writer.add_scalar("LearningRate", current_learning_rate, global_step=i * 3 + j + 1)
-            board_writer.add_figure("CurrentResult", figure= fig,global_step=i * 3 + j + 1)
+            for k in range(10):
+                fig, axes = plt.subplots(1, 2)
+                fname = glob.glob(f"{tile_folder}")[random.randrange(0,len(data_files))]
+                if CURR_FIGURE:
+                    try: plt.close(CURR_FIGURE)
+                    except: print("e")
+                axes[0].imshow(get_im(load_tile(fname, device)[0]))
+                axes[1].imshow(get_im(model(load_tile(fname, device))[0]))
+                board_writer.add_figure("CurrentResult", figure= fig,global_step=(i * 1 + j) * 10 + k)
             CURR_FIGURE = fig
             board_writer.flush()
         # save full model (encode+decode, need class definition to load, but weights are saved)
