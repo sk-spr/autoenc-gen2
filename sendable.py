@@ -83,15 +83,19 @@ class EncNet(nn.Module):
         super().__init__()
         # encoder: image -> latent_dims * 4 bytes
         self.encoder = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(256 * 256, 128*128), # output is shape (4,128,128)
+            nn.Conv2d(1, 8, 3, stride=1, padding=1),
             nn.LeakyReLU(),
-            nn.Linear(128*128, deep_n),
+            nn.MaxPool2d(2, stride=2),
+            nn.Conv2d(8, 4, 3, stride=1, padding=1),
+            nn.LeakyReLU(),
+            nn.MaxPool2d(2, stride=2),
+            nn.Flatten(),
+            nn.Linear(64*64*4, deep_n), # output is shape (4,128,128)
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
             nn.Linear(deep_n, latent_dims),
-            nn.Sigmoid()
+            nn.LeakyReLU()
         )
         # decoder is pretty directly mirror, but trained independently
         self.decoder = nn.Sequential(
@@ -99,11 +103,13 @@ class EncNet(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
-            nn.Linear(deep_n, 128*128),
+            nn.Linear(deep_n, 64*64*4),
             nn.LeakyReLU(),
-            nn.Linear(128*128, 256*256),
-            nn.Sigmoid(),
-            nn.Unflatten(1, torch.Size((1, 256, 256))),
+            nn.Unflatten(1, (4,64,64)),
+            nn.ConvTranspose2d(4,8,3,stride=2,padding=1,output_padding=1),
+            nn.LeakyReLU(),
+            nn.ConvTranspose2d(8,1,3,stride=2,padding=1,output_padding=1),
+            nn.Sigmoid()
 
         )
     def forward(self, x: Tensor):
@@ -114,22 +120,22 @@ class EncNet(nn.Module):
         #print(decoded.shape)
         return decoded
 
-def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Module, opt: torch.optim.Optimizer, writer: SummaryWriter, starti, stop=99999999, write_tensorboard=True, batch_size=1024):
+def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Module, opt: torch.optim.Optimizer, writer: SummaryWriter, starti, stop=99999999, write_tensorboard=True, batch_size=1024, subcycles=2):
     loss_nums = []
-    subcycles = 2
     for i in range(subcycles): # increase number of per-epoch cycles if training is over too quickly before reloading to test
         mod.train()
         for batch, x in enumerate(dataloader):
             input_batch = x
             input_batch = torch.squeeze(input_batch, 1)
             rep_losses = []
-            for rep in range(2):
+            for rep in range(6):
                 prediction = mod(input_batch)
                 #print(input_batch.shape, "vs", prediction.shape)
                 #print(input_batch.shape, prediction.shape)
                 assert prediction.shape == input_batch.shape
                 calculated_loss = loss(prediction, input_batch)
 
+                opt.zero_grad()
                 calculated_loss.backward()
                 opt.step()
                 loss_nums.append(calculated_loss.item())
@@ -137,13 +143,13 @@ def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Mo
 
 
                 if write_tensorboard:
-                    writer.add_scalar("Loss/TrainFine", calculated_loss.item(), (starti + i * (len(data_files) / batch_size) + batch) * 2 + rep)
+                    writer.add_scalar("Loss/TrainFine", calculated_loss.item(), (starti + i * (len(data_files) / batch_size) + batch) * 6 + rep)
                     writer.flush()
 
             print(f"[{int(batch / (len(data_files) / batch_size) * 100):>2d}%]Batch {batch:0>5} ({batch * batch_size} images procd) - loss {float(np.mean(np.array(rep_losses)))}")
             if batch % math.floor(10000/batch_size) == 0:
                 disp_im = load_tile(data_files[random.randrange(0, len(data_files))], device)
-                imshow(disp_im.squeeze(0), model(disp_im.squeeze(0)))
+                imshow(disp_im.squeeze(0), model(disp_im).squeeze(0))
                 if write_tensorboard:
                     fig, axes = plt.subplots(1,2)
                     axes[0].imshow(get_im(disp_im.squeeze(0)))
@@ -308,8 +314,8 @@ if __name__ == '__main__':
         batch_size=batch_size,  # first dimension of matrices sent,
         shuffle=True,  # randomize order
         generator=torch.Generator(device),  # load to GPU
-        num_workers=5, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
-        prefetch_factor=1,  # increase like num_workers, same reasons
+        num_workers=8, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
+        prefetch_factor=6,  # increase like num_workers, same reasons
         pin_memory=False,  # would not work with parallelisation...
         persistent_workers=True)  # make workers resident
     for i in range(100):
@@ -324,17 +330,20 @@ if __name__ == '__main__':
         board_writer.add_figure("CurrentResult", figure=fig, global_step=i * 3 )
 
         # run training/test loop n times
-        train_iter_per_epoch = 1
+        train_iter_per_epoch = 2
         for j in range(train_iter_per_epoch):
             print(f"-------------\n[[{int(j/train_iter_per_epoch * 100.0):>2d}%]]\n-----------")
+
+            num_train_subcycles = 1 if i < 1 else 3
             tick = time.time()
-            train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, (i * train_iter_per_epoch + j) * 1 * (len(data_files) / batch_size), len(data_files), True, batch_size)
-            time_full_train = (time.time() - tick) / (len(data_files) * 1) # FIXME pull this scalar from the same place as train() subepoch count
+            train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, (i * train_iter_per_epoch + j) * 1 * (len(data_files) / batch_size), len(data_files), True, batch_size, num_train_subcycles)
+            time_full_train = (time.time() - tick) / (len(data_files) * num_train_subcycles) # FIXME pull this scalar from the same place as train() subepoch count
             print(f"average {(time_full_train * 1000):2<5f}ms training time per image (approx)")
             loss_hist = loss_hist + train_losses
             test_losses = test(data_loader, model, loss_fn)
             board_writer.add_scalar("Loss/test", test_losses, i * train_iter_per_epoch + j + 1 )
             board_writer.flush()
+
             loss_hist.append(test_losses)
 
             board_writer.add_scalar("LearningRate", current_learning_rate, global_step=i * 3 + j + 1)
