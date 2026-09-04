@@ -83,34 +83,32 @@ class EncNet(nn.Module):
         super().__init__()
         # encoder: image -> latent_dims * 4 bytes
         self.encoder = nn.Sequential(
-            nn.Conv2d(1, 8, 3, stride=1, padding=1),
+            nn.Conv2d(1, 8, 9, stride=3, padding=0),
             nn.LeakyReLU(),
-            nn.MaxPool2d(2, stride=2),
+            nn.MaxPool2d(8, stride=2),
             nn.Conv2d(8, 4, 3, stride=1, padding=1),
             nn.LeakyReLU(),
             nn.MaxPool2d(2, stride=2),
             nn.Flatten(),
-            nn.Linear(64*64*4, deep_n), # output is shape (4,128,128)
+            nn.Linear(4*19*19, deep_n), # output is shape (4,128,128)
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
             nn.Linear(deep_n, latent_dims),
             nn.LeakyReLU()
         )
-        # decoder is pretty directly mirror, but trained independently
         self.decoder = nn.Sequential(
             nn.Linear(latent_dims, deep_n),
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
-            nn.Linear(deep_n, 64*64*4),
+            nn.Linear(deep_n, 4*18*18),
             nn.LeakyReLU(),
-            nn.Unflatten(1, (4,64,64)),
-            nn.ConvTranspose2d(4,8,3,stride=2,padding=1,output_padding=1),
-            nn.LeakyReLU(),
-            nn.ConvTranspose2d(8,1,3,stride=2,padding=1,output_padding=1),
+            nn.Unflatten(1, (4,18,18)),
+            nn.ConvTranspose2d(4,8,3,stride=2,padding=3,output_padding=0),            nn.LeakyReLU(),
+            nn.ConvTranspose2d(8,8,7,stride=2,padding=2,output_padding=0),            nn.LeakyReLU(),
+            nn.ConvTranspose2d(8,1,7,stride=4,padding=0, output_padding=1),
             nn.Sigmoid()
-
         )
     def forward(self, x: Tensor):
         #print(x.shape)
@@ -306,7 +304,7 @@ if __name__ == '__main__':
         current_learning_rate = improvement_scaled[0][0]  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
     else:
         current_learning_rate = 1e-5
-        batch_size = 2048
+        batch_size = 6144
         model = orig_model.cuda(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
     data_loader = torch.utils.data.DataLoader(
@@ -315,7 +313,7 @@ if __name__ == '__main__':
         shuffle=True,  # randomize order
         generator=torch.Generator(device),  # load to GPU
         num_workers=8, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
-        prefetch_factor=6,  # increase like num_workers, same reasons
+        prefetch_factor=2,  # increase like num_workers, same reasons
         pin_memory=False,  # would not work with parallelisation...
         persistent_workers=True)  # make workers resident
     for i in range(100):
