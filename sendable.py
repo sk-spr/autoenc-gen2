@@ -103,14 +103,15 @@ class EncNet(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
-            nn.Linear(deep_n, 4*18*18),
+            nn.Linear(deep_n, 4*29*29),
             nn.LeakyReLU(),
-            nn.Unflatten(1, (4,18,18)),
-            nn.ConvTranspose2d(4,8,3,stride=2,padding=0,output_padding=0),
+            nn.Unflatten(1, (4,29,29)),
+            nn.ConvTranspose2d(4,8,3,stride=1,padding=0,output_padding=0),
             nn.LeakyReLU(),
-            nn.ConvTranspose2d(8,1,5,stride=2,padding=2,output_padding=0),
+            nn.ConvTranspose2d(8,8,9,stride=4,padding=1,output_padding=1),
+            nn.LeakyReLU(),
+            nn.ConvTranspose2d(8,1,5,stride=2,padding=1,output_padding=0),
             nn.Sigmoid()
-
         )
     def forward(self, x: Tensor):
         #print(x.shape)
@@ -132,7 +133,7 @@ def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Mo
                 prediction = mod(input_batch)
                 #print(input_batch.shape, "vs", prediction.shape)
                 #print(input_batch.shape, prediction.shape)
-                assert prediction.shape == input_batch.shape
+                assert prediction.shape == input_batch.shape, f"Prediction was shape {prediction.shape}, should be {input_batch.shape}"
                 calculated_loss = loss(prediction, input_batch)
 
                 opt.zero_grad()
@@ -198,7 +199,7 @@ if __name__ == '__main__':
     learning_rate_candidates = [1e-6, 1e-5]
 
     # set the glob expression for the input tif tiles
-    tile_folder = "/home/skye/data/switzerland_tiles/18/*/*.tif"
+    tile_folder = "/home/ubuntu/autoenc-gen2/data/tiles/18/*/*.tif"
     zoom_level = "**"
     data_files = glob.glob(tile_folder)
     print(f"{len(data_files)} raw files")
@@ -306,7 +307,7 @@ if __name__ == '__main__':
         current_learning_rate = improvement_scaled[0][0]  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
     else:
         current_learning_rate = 1e-4
-        batch_size = 256
+        batch_size = 4096
         model = orig_model.cuda(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
     data_loader = torch.utils.data.DataLoader(
@@ -317,7 +318,9 @@ if __name__ == '__main__':
         num_workers=6, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
         prefetch_factor=3,  # increase like num_workers, same reasons
         pin_memory=False,  # would not work with parallelisation...
-        persistent_workers=True)  # make workers resident
+        persistent_workers=True,
+        drop_last=True
+        )  # make workers resident
     for i in range(100):
         print(f"------------------------\nEpoch {i}")
         # each epoch contains train_iter_per_epoch cycles, each train call runs the dataset 4 times
