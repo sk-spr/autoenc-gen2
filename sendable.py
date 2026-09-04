@@ -72,7 +72,7 @@ class HeightTileDataset(torch.utils.data.Dataset):
 
 image_size = 256 # image side length
 latent_dims = 1024 # ~= number of float32 values to compress into
-deep_n = 1024 # width of hidden deep layers
+deep_n = 4096 # width of hidden deep layers
 
 ksize = 8 # main convolution kernel size
 stride = 2 # main convolution kernel stride
@@ -83,14 +83,14 @@ class EncNet(nn.Module):
         super().__init__()
         # encoder: image -> latent_dims * 4 bytes
         self.encoder = nn.Sequential(
-            nn.Conv2d(1, 8, 3, stride=1, padding=1),
+            nn.Conv2d(1, 8, 9, stride=3, padding=0),
             nn.LeakyReLU(),
-            nn.MaxPool2d(2, stride=2),
+            nn.MaxPool2d(8, stride=2),
             nn.Conv2d(8, 4, 3, stride=1, padding=1),
             nn.LeakyReLU(),
             nn.MaxPool2d(2, stride=2),
             nn.Flatten(),
-            nn.Linear(64*64*4, deep_n), # output is shape (4,128,128)
+            nn.Linear(4*19*19, deep_n), # output is shape (4,128,128)
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
@@ -103,12 +103,12 @@ class EncNet(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
-            nn.Linear(deep_n, 64*64*4),
+            nn.Linear(deep_n, 4*18*18),
             nn.LeakyReLU(),
-            nn.Unflatten(1, (4,64,64)),
-            nn.ConvTranspose2d(4,8,3,stride=2,padding=1,output_padding=1),
+            nn.Unflatten(1, (4,18,18)),
+            nn.ConvTranspose2d(4,8,3,stride=2,padding=0,output_padding=0),
             nn.LeakyReLU(),
-            nn.ConvTranspose2d(8,1,3,stride=2,padding=1,output_padding=1),
+            nn.ConvTranspose2d(8,1,5,stride=2,padding=2,output_padding=0),
             nn.Sigmoid()
 
         )
@@ -116,7 +116,7 @@ class EncNet(nn.Module):
         #print(x.shape)
         encoded = self.encoder(x)
         #print(encoded.shape)
-        decoded = self.decoder(encoded)
+        decoded = self.decoder(encoded)[:,:,:256,:256]
         #print(decoded.shape)
         return decoded
 
@@ -198,7 +198,7 @@ if __name__ == '__main__':
     learning_rate_candidates = [1e-6, 1e-5]
 
     # set the glob expression for the input tif tiles
-    tile_folder = "/home/ubuntu/autoenc-gen2/data/tiles/18/*/*.tif"
+    tile_folder = "/home/skye/data/switzerland_tiles/18/*/*.tif"
     zoom_level = "**"
     data_files = glob.glob(tile_folder)
     print(f"{len(data_files)} raw files")
@@ -305,8 +305,8 @@ if __name__ == '__main__':
         batch_size = improvement_scaled[0][1]
         current_learning_rate = improvement_scaled[0][0]  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
     else:
-        current_learning_rate = 1e-5
-        batch_size = 2048
+        current_learning_rate = 1e-4
+        batch_size = 256
         model = orig_model.cuda(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
     data_loader = torch.utils.data.DataLoader(
@@ -314,8 +314,8 @@ if __name__ == '__main__':
         batch_size=batch_size,  # first dimension of matrices sent,
         shuffle=True,  # randomize order
         generator=torch.Generator(device),  # load to GPU
-        num_workers=8, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
-        prefetch_factor=6,  # increase like num_workers, same reasons
+        num_workers=6, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
+        prefetch_factor=3,  # increase like num_workers, same reasons
         pin_memory=False,  # would not work with parallelisation...
         persistent_workers=True)  # make workers resident
     for i in range(100):
