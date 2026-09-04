@@ -72,7 +72,7 @@ class HeightTileDataset(torch.utils.data.Dataset):
 
 image_size = 256 # image side length
 latent_dims = 1024 # ~= number of float32 values to compress into
-deep_n = 1024 # width of hidden deep layers
+deep_n = 2048 # width of hidden deep layers
 
 ksize = 8 # main convolution kernel size
 stride = 2 # main convolution kernel stride
@@ -84,14 +84,12 @@ class EncNet(nn.Module):
         # encoder: image -> latent_dims * 4 bytes
         self.encoder = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(256 * 256, 128*128), # output is shape (4,128,128)
-            nn.LeakyReLU(),
-            nn.Linear(128*128, deep_n),
+            nn.Linear(256 * 256, deep_n),
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
             nn.Linear(deep_n, latent_dims),
-            nn.Sigmoid()
+            nn.LeakyReLU()
         )
         # decoder is pretty directly mirror, but trained independently
         self.decoder = nn.Sequential(
@@ -99,9 +97,7 @@ class EncNet(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
-            nn.Linear(deep_n, 128*128),
-            nn.LeakyReLU(),
-            nn.Linear(128*128, 256*256),
+            nn.Linear(deep_n, 256*256),
             nn.Sigmoid(),
             nn.Unflatten(1, torch.Size((1, 256, 256))),
 
@@ -192,7 +188,7 @@ if __name__ == '__main__':
     learning_rate_candidates = [1e-6, 1e-5]
 
     # set the glob expression for the input tif tiles
-    tile_folder = "/home/ubuntu/autoenc-gen2/data/tiles/18/*/*.tif"
+    tile_folder = "/home/skye/data/switzerland_tiles/16/*/*.tif"
     zoom_level = "**"
     data_files = glob.glob(tile_folder)
     print(f"{len(data_files)} raw files")
@@ -299,8 +295,8 @@ if __name__ == '__main__':
         batch_size = improvement_scaled[0][1]
         current_learning_rate = improvement_scaled[0][0]  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
     else:
-        current_learning_rate = 1e-5
-        batch_size = 2048
+        current_learning_rate = 1e-6
+        batch_size = 64
         model = orig_model.cuda(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
     data_loader = torch.utils.data.DataLoader(
@@ -308,7 +304,7 @@ if __name__ == '__main__':
         batch_size=batch_size,  # first dimension of matrices sent,
         shuffle=True,  # randomize order
         generator=torch.Generator(device),  # load to GPU
-        num_workers=5, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
+        num_workers=3, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
         prefetch_factor=1,  # increase like num_workers, same reasons
         pin_memory=False,  # would not work with parallelisation...
         persistent_workers=True)  # make workers resident
