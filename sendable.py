@@ -88,9 +88,8 @@ class EncNet(nn.Module):
             nn.MaxPool2d(8, stride=2),
             nn.Conv2d(8, 4, 3, stride=1, padding=1),
             nn.LeakyReLU(),
-            nn.MaxPool2d(2, stride=2),
             nn.Flatten(),
-            nn.Linear(4*19*19, deep_n), # output is shape (4,128,128)
+            nn.Linear(4*38*38, deep_n), # output is shape (4,128,128)
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
@@ -103,14 +102,14 @@ class EncNet(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
-            nn.Linear(deep_n, 4*29*29),
+            nn.Linear(deep_n, 4*32*32),
             nn.LeakyReLU(),
-            nn.Unflatten(1, (4,29,29)),
-            nn.ConvTranspose2d(4,8,3,stride=1,padding=0,output_padding=0),
+            nn.Unflatten(1, (4,32,32)),
+            nn.ConvTranspose2d(4,8,3,stride=2,padding=1,output_padding=0),
             nn.LeakyReLU(),
-            nn.ConvTranspose2d(8,8,9,stride=4,padding=1,output_padding=1),
+            nn.ConvTranspose2d(8,8,13,stride=4,padding=2,output_padding=0),
             nn.LeakyReLU(),
-            nn.ConvTranspose2d(8,1,5,stride=2,padding=1,output_padding=0),
+            nn.ConvTranspose2d(8,1,3,stride=1,padding=1,output_padding=0),
             nn.Sigmoid()
         )
     def forward(self, x: Tensor):
