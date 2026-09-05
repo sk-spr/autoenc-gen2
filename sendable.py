@@ -71,7 +71,7 @@ class HeightTileDataset(torch.utils.data.Dataset):
 
 
 image_size = 256 # image side length
-latent_dims = 1024 # ~= number of float32 values to compress into
+latent_dims = 2048 # ~= number of float32 values to compress into
 deep_n = 4096 # width of hidden deep layers
 
 ksize = 8 # main convolution kernel size
@@ -146,7 +146,8 @@ def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Mo
                     writer.add_scalar("Loss/TrainFine", calculated_loss.item(), (starti + i * (len(data_files) / batch_size) + batch) * 6 + rep)
                     writer.flush()
 
-            print(f"[{int(batch / (len(data_files) / batch_size) * 100):>2d}%]Batch {batch:0>5} ({batch * batch_size} images procd) - loss {float(np.mean(np.array(rep_losses)))}")
+            if batch % 4 == 0:
+                print(f"[{int(batch / (len(data_files) / batch_size) * 100):>2d}%]Batch {batch:0>5} ({batch * batch_size} images procd) - loss {float(np.mean(np.array(rep_losses)))}")
             if batch % math.floor(10000/batch_size) == 0:
                 disp_im = load_tile(data_files[random.randrange(0, len(data_files))], device)
                 imshow(disp_im.squeeze(0), model(disp_im).squeeze(0))
@@ -216,7 +217,8 @@ if __name__ == '__main__':
     model = EncNet().to(device)
 
     # uncomment and adjust path to load checkpointed model
-    #model = torch.load("./models/height5_ep1.pt2", weights_only=False).to(device)
+    
+    #model = torch.load("./models/height7_ep1.pt2", weights_only=False).to(device)
 
     orig_model = model.cpu()
 
@@ -306,7 +308,7 @@ if __name__ == '__main__':
         current_learning_rate = improvement_scaled[0][0]  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
     else:
         current_learning_rate = 1e-4
-        batch_size = 4096
+        batch_size = 512
         model = orig_model.cuda(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
     data_loader = torch.utils.data.DataLoader(
@@ -314,8 +316,8 @@ if __name__ == '__main__':
         batch_size=batch_size,  # first dimension of matrices sent,
         shuffle=True,  # randomize order
         generator=torch.Generator(device),  # load to GPU
-        num_workers=6, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
-        prefetch_factor=3,  # increase like num_workers, same reasons
+        num_workers=8, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
+        prefetch_factor=16,  # increase like num_workers, same reasons
         pin_memory=False,  # would not work with parallelisation...
         persistent_workers=True,
         drop_last=True
@@ -332,7 +334,7 @@ if __name__ == '__main__':
         board_writer.add_figure("CurrentResult", figure=fig, global_step=i * 3 )
 
         # run training/test loop n times
-        train_iter_per_epoch = 2
+        train_iter_per_epoch = 1 if i < 2 else 3
         for j in range(train_iter_per_epoch):
             print(f"-------------\n[[{int(j/train_iter_per_epoch * 100.0):>2d}%]]\n-----------")
 
@@ -362,7 +364,14 @@ if __name__ == '__main__':
             board_writer.flush()
         # save full model (encode+decode, need class definition to load, but weights are saved)
         # should be 24.0MiB
-        torch.save(model, f"models/height7_ep{i}.pt2")
+        torch.save(model, f"models/height8_ep{i}.pt2")
+
+        try:
+            export = torch.export.export(model, (load_tile(fname, device), ))
+            torch.export.save(export, f"models/height8_ep{i}_export.pt2")
+        except Exception as e:
+            print("Error exporting: ", e)
+
         fig, ax = plt.subplots(1,1)
         ax.plot(loss_hist)
         fig.show()
