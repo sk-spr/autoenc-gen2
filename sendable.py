@@ -109,7 +109,9 @@ class EncNet(nn.Module):
             nn.LeakyReLU(),
             nn.ConvTranspose2d(8,8,13,stride=4,padding=2,output_padding=0),
             nn.LeakyReLU(),
-            nn.ConvTranspose2d(8,1,3,stride=1,padding=1,output_padding=0),
+            nn.ConvTranspose2d(8,8,3,stride=1,padding=1,output_padding=0),
+            nn.LeakyReLU(),
+            nn.Conv2d(8,1,5,stride=1,padding=2), # hopefully reconstruct sharp details (?)
             nn.Sigmoid()
         )
     def forward(self, x: Tensor):
@@ -122,13 +124,13 @@ class EncNet(nn.Module):
 
 def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Module, opt: torch.optim.Optimizer, writer: SummaryWriter, starti, stop=99999999, write_tensorboard=True, batch_size=1024, subcycles=2):
     loss_nums = []
-    for i in range(subcycles): # increase number of per-epoch cycles if training is over too quickly before reloading to test
+    for subcycle_i in range(subcycles): # increase number of per-epoch cycles if training is over too quickly before reloading to test
         mod.train()
         for batch, x in enumerate(dataloader):
             input_batch = x
             input_batch = torch.squeeze(input_batch, 1)
             rep_losses = []
-            for rep in range(6):
+            for rep in range(1):
                 prediction = mod(input_batch)
                 #print(input_batch.shape, "vs", prediction.shape)
                 #print(input_batch.shape, prediction.shape)
@@ -143,7 +145,7 @@ def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Mo
 
 
                 if write_tensorboard:
-                    writer.add_scalar("Loss/TrainFine", calculated_loss.item(), (starti + i * (len(data_files) / batch_size) + batch) * 6 + rep)
+                    writer.add_scalar("Loss/TrainFine", calculated_loss.item(), (starti + subcycle_i * (len(data_files) / batch_size) + batch) * 1 + rep)
                     writer.flush()
 
             if batch % 4 == 0:
@@ -199,9 +201,11 @@ if __name__ == '__main__':
     learning_rate_candidates = [1e-6, 1e-5]
 
     # set the glob expression for the input tif tiles
-    tile_folder = "/home/ubuntu/autoenc-gen2/data/tiles/18/*/*.tif"
+    tile_folders = ["/run/media/skye/backup31/data/switzerland_tiles/18/*/*.tif", "/run/media/skye/GenericStorage/data/tirol_tiles/part*/18/*/*.tif", "/home/skye/data/swit_tiles2/18/*/*.tif"]
     zoom_level = "**"
-    data_files = glob.glob(tile_folder)
+    data_files = []
+    for glob_expr in tile_folders:
+        data_files += glob.glob(glob_expr)
     print(f"{len(data_files)} raw files")
 
     # exclude files under 1.2k (empty images from outside the mapped area)
@@ -214,16 +218,15 @@ if __name__ == '__main__':
     torch.set_default_device(device)
 
     torch.cuda.empty_cache()
-    model = EncNet().to(device)
+    #model = EncNet().to(device)
 
     # uncomment and adjust path to load checkpointed model
-    
-    #model = torch.load("./models/height7_ep1.pt2", weights_only=False).to(device)
+    model = torch.load("models/height9_ep2.pt2", weights_only=False).to(device)
 
     orig_model = model.cpu()
 
     loss_fn = nn.MSELoss()
-    current_learning_rate = 1e-4 # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
+    current_learning_rate = 1e-3 # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True) # lr?
 
     print("Initializing dataloader")
@@ -252,9 +255,9 @@ if __name__ == '__main__':
                 batch_size=batch_size_candidate,  # first dimension of matrices sent,
                 shuffle=True,  # randomize order
                 generator=torch.Generator(device),  # load to GPU
-                num_workers=12,
+                num_workers=4,
                 # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
-                prefetch_factor=12,  # increase like num_workers, same reasons
+                prefetch_factor=2,  # increase like num_workers, same reasons
                 pin_memory=False,  # would not work with parallelisation...
                 persistent_workers=True)  # make workers resident
             for learning_rate_candidate in learning_rate_candidates:
@@ -308,7 +311,7 @@ if __name__ == '__main__':
         current_learning_rate = improvement_scaled[0][0]  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
     else:
         current_learning_rate = 1e-4
-        batch_size = 512
+        batch_size = 64
         model = orig_model.cuda(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
     data_loader = torch.utils.data.DataLoader(
@@ -316,8 +319,8 @@ if __name__ == '__main__':
         batch_size=batch_size,  # first dimension of matrices sent,
         shuffle=True,  # randomize order
         generator=torch.Generator(device),  # load to GPU
-        num_workers=8, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
-        prefetch_factor=16,  # increase like num_workers, same reasons
+        num_workers=12, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
+        prefetch_factor=2,  # increase like num_workers, same reasons
         pin_memory=False,  # would not work with parallelisation...
         persistent_workers=True,
         drop_last=True
@@ -329,16 +332,16 @@ if __name__ == '__main__':
         # display current inference result
         fig, axes = plt.subplots(1, 2)
 
-        fname = glob.glob(f"{tile_folder}")[random.randrange(0, len(data_files))]
+        fname = data_files[random.randrange(0, len(data_files))]
         imshow(load_tile(fname, device)[0], model(load_tile(fname, device))[0])
         board_writer.add_figure("CurrentResult", figure=fig, global_step=i * 3 )
 
         # run training/test loop n times
-        train_iter_per_epoch = 1 if i < 2 else 3
+        train_iter_per_epoch = 1 if i < 2 else 2
         for j in range(train_iter_per_epoch):
             print(f"-------------\n[[{int(j/train_iter_per_epoch * 100.0):>2d}%]]\n-----------")
 
-            num_train_subcycles = 1 if i < 1 else 3
+            num_train_subcycles = 1 if i < 1 else 1
             tick = time.time()
             train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, (i * train_iter_per_epoch + j) * 1 * (len(data_files) / batch_size), len(data_files), True, batch_size, num_train_subcycles)
             time_full_train = (time.time() - tick) / (len(data_files) * num_train_subcycles) # FIXME pull this scalar from the same place as train() subepoch count
@@ -353,7 +356,7 @@ if __name__ == '__main__':
             board_writer.add_scalar("LearningRate", current_learning_rate, global_step=i * 3 + j + 1)
             for k in range(10):
                 fig, axes = plt.subplots(1, 2)
-                fname = glob.glob(f"{tile_folder}")[random.randrange(0,len(data_files))]
+                fname = data_files[random.randrange(0,len(data_files))]
                 if CURR_FIGURE:
                     try: plt.close(CURR_FIGURE)
                     except: print("e")
@@ -364,11 +367,11 @@ if __name__ == '__main__':
             board_writer.flush()
         # save full model (encode+decode, need class definition to load, but weights are saved)
         # should be 24.0MiB
-        torch.save(model, f"models/height8_ep{i}.pt2")
+        torch.save(model, f"models/height9_ep{i}.pt2")
 
         try:
             export = torch.export.export(model, (load_tile(fname, device), ))
-            torch.export.save(export, f"models/height8_ep{i}_export.pt2")
+            torch.export.save(export, f"models/height9_ep{i}_export.pt2")
         except Exception as e:
             print("Error exporting: ", e)
 

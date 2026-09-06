@@ -18,7 +18,7 @@ def download_tile(datafolder,url):
             file_name = url.split("/")[-1]
             if os.path.exists(datafolder + "/" + file_name):
                 return
-            response = requests.get(url)
+            response = requests.get(url, timeout=60)
             with open(f"{datafolder}/{file_name}", "wb") as tilefile:
                 tilefile.write(response.content)
                 tilefile.flush()
@@ -42,7 +42,7 @@ if __name__ == "__main__":
         if len(glob.glob(f"{raw_folder}/*.tif")) < len(links):
             print("downloading...")
             print("There are {} CPUs on this machine ".format(cpu_count()))
-            pool = Pool(cpu_count() * 16)
+            pool = Pool(cpu_count())
             download_func = partial(download_tile, raw_folder)
             results = pool.map(download_func, links)
             pool.close()
