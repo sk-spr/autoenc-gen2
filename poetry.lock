@@ -1732,6 +1732,21 @@ files = [
 six = ">=1.5"
 
 [[package]]
+name = "pytorch-msssim"
+version = "1.0.0"
+description = "Fast and differentiable MS-SSIM and SSIM for pytorch."
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "pytorch_msssim-1.0.0-py3-none-any.whl", hash = "sha256:0b4b7bbf7035fe9dc8084244237aac13b1f104852c45b63a7e9fab4363bede54"},
+    {file = "pytorch_msssim-1.0.0.tar.gz", hash = "sha256:53273f03ce5c435f706f49feb5110a8afe90b2519484b0fe0df9639670106d0b"},
+]
+
+[package.dependencies]
+torch = "*"
+
+[[package]]
 name = "requests"
 version = "2.34.2"
 description = "Python HTTP for Humans."
@@ -2023,4 +2038,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12.0,<=3.13.20"
-content-hash = "f338a4da25a6e24290f244d101a90b22e571f47f98cd0464cf4d04cfbd208963"
+content-hash = "20a3e00275533f1b55d1241706bfe56441d64666247ddc2a9cfcb2cb0fb3192f"

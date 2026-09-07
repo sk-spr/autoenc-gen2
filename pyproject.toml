@@ -15,7 +15,8 @@ dependencies = [
     "wget (>=3.2, <3.3)",
     "requests (>=2.34.0, <2.35)",
     "onnxscript",
-    "onnxruntime-gpu"
+    "onnxruntime-gpu",
+    "pytorch-msssim"
 ]
 
 [build-system]
