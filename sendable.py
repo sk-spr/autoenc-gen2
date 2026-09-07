@@ -74,6 +74,9 @@ image_size = 256 # image side length
 latent_dims = 2048 # ~= number of float32 values to compress into
 deep_n = 4096 # width of hidden deep layers
 
+post_structure_ksize = 17
+post_structure_deep_n = 4096
+
 ksize = 8 # main convolution kernel size
 stride = 2 # main convolution kernel stride
 padding = 3 # main convolution kernel application padding
@@ -102,23 +105,36 @@ class EncNet(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
-            nn.Linear(deep_n, 4*32*32),
+            nn.Linear(deep_n, 4*33*33),
             nn.LeakyReLU(),
-            nn.Unflatten(1, (4,32,32)),
+            nn.Unflatten(1, (4,33,33)),
             nn.ConvTranspose2d(4,8,3,stride=2,padding=1,output_padding=0),
             nn.LeakyReLU(),
-            nn.ConvTranspose2d(8,8,13,stride=4,padding=2,output_padding=0),
+            nn.ConvTranspose2d(8,8,13,stride=4,padding=0,output_padding=0),
             nn.LeakyReLU(),
-            nn.ConvTranspose2d(8,8,3,stride=1,padding=1,output_padding=0),
+            nn.ConvTranspose2d(8,8,5,stride=1,padding=0,output_padding=0),
+            nn.LeakyReLU()
+        )
+        self.post_structure_calc = nn.Sequential(
+            nn.Linear(latent_dims, post_structure_deep_n),
             nn.LeakyReLU(),
-            nn.Conv2d(8,1,5,stride=1,padding=2), # hopefully reconstruct sharp details (?)
-            nn.Sigmoid()
+            nn.Linear(post_structure_deep_n, post_structure_deep_n),
+            nn.LeakyReLU(),
+            nn.Linear(post_structure_deep_n, post_structure_ksize * post_structure_ksize * 8),
+            nn.LeakyReLU(),
+            nn.Unflatten(1, (8, post_structure_ksize, post_structure_ksize))
         )
     def forward(self, x: Tensor):
         #print(x.shape)
         encoded = self.encoder(x)
         #print(encoded.shape)
-        decoded = self.decoder(encoded)[:,:,:256,:256]
+        decoded = self.decoder(encoded)
+        structure_kernels: Tensor = self.post_structure_calc(encoded)
+        batch_dim = structure_kernels.shape[0]
+        #print(batch_dim, x.shape, structure_kernels.shape)
+        decoded = nn.functional.conv2d(decoded.reshape((-1, 273, 273)), structure_kernels.reshape((batch_dim,-1,) + structure_kernels.shape[2:]), padding=0, groups=batch_dim).unsqueeze(1)
+        decoded = decoded[:,:,:256, :256]
+        decoded = nn.functional.sigmoid(decoded)
         #print(decoded.shape)
         return decoded
 
@@ -221,7 +237,7 @@ if __name__ == '__main__':
     #model = EncNet().to(device)
 
     # uncomment and adjust path to load checkpointed model
-    model = torch.load("models/height9_ep2.pt2", weights_only=False).to(device)
+    model = torch.load("models/height10_ep4.pt2", weights_only=False).to(device)
 
     orig_model = model.cpu()
 
@@ -367,11 +383,11 @@ if __name__ == '__main__':
             board_writer.flush()
         # save full model (encode+decode, need class definition to load, but weights are saved)
         # should be 24.0MiB
-        torch.save(model, f"models/height9_ep{i}.pt2")
+        torch.save(model, f"models/height10_ep{i}.pt2")
 
         try:
             export = torch.export.export(model, (load_tile(fname, device), ))
-            torch.export.save(export, f"models/height9_ep{i}_export.pt2")
+            torch.export.save(export, f"models/height10_ep{i}_export.pt2")
         except Exception as e:
             print("Error exporting: ", e)
 
