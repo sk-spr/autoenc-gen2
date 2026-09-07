@@ -5,7 +5,9 @@ import random
 import time
 from asyncio import Task
 
+import pytorch_msssim
 import tensorboard
+from pytorch_msssim import ms_ssim
 from torch.multiprocessing import freeze_support
 import numpy as np
 
@@ -26,9 +28,9 @@ from torch.utils.tensorboard import SummaryWriter
 CURR_FIGURE=None
 
 def load_tile(fname, device):
-    im = (np.array(Image.open(fname).get_flattened_data()).reshape(1, image_size, image_size)).astype(np.float32)
-    min_val = np.amin(im).astype(np.float32)
-    max_val = np.amax(im).astype(np.float32)
+    im = (np.array(Image.open(fname).get_flattened_data()).reshape(1, image_size, image_size))
+    min_val = np.amin(im)
+    max_val = np.amax(im)
     #print(max_val - min_val)
     return torch.from_numpy((im - min_val) / (max(max_val - min_val, 1))).unsqueeze(0).to(device, torch.float)
 
@@ -71,11 +73,12 @@ class HeightTileDataset(torch.utils.data.Dataset):
 
 
 image_size = 256 # image side length
-latent_dims = 2048 # ~= number of float32 values to compress into
+latent_dims = 3*1024 # ~= number of float32 values to compress into
 deep_n = 4096 # width of hidden deep layers
 
 post_structure_ksize = 17
-post_structure_deep_n = 4096
+post_structure_deep_n = 2048
+post_structure_latent = 1024
 
 ksize = 8 # main convolution kernel size
 stride = 2 # main convolution kernel stride
@@ -115,33 +118,50 @@ class EncNet(nn.Module):
             nn.ConvTranspose2d(8,8,5,stride=1,padding=0,output_padding=0),
             nn.LeakyReLU()
         )
+
         self.post_structure_calc = nn.Sequential(
-            nn.Linear(latent_dims, post_structure_deep_n),
+            nn.Conv2d(1,4,15,7),
+            nn.LeakyReLU(),
+            nn.Flatten(),
+            nn.Linear(4*35*35, post_structure_deep_n),
             nn.LeakyReLU(),
             nn.Linear(post_structure_deep_n, post_structure_deep_n),
             nn.LeakyReLU(),
-            nn.Linear(post_structure_deep_n, post_structure_ksize * post_structure_ksize * 8),
+            nn.Linear(post_structure_deep_n, post_structure_latent),
             nn.LeakyReLU(),
-            nn.Unflatten(1, (8, post_structure_ksize, post_structure_ksize))
+        )
+
+        self.post_structure_recover = nn.Sequential(
+            nn.Linear(post_structure_latent, post_structure_deep_n),
+            nn.LeakyReLU(),
+            nn.Linear(post_structure_deep_n, post_structure_deep_n),
+            nn.LeakyReLU(),
+            nn.Linear(post_structure_deep_n, 8 * post_structure_ksize * post_structure_ksize),
+            nn.LeakyReLU(),
+            nn.Unflatten(1, (8,post_structure_ksize,post_structure_ksize))
         )
     def forward(self, x: Tensor):
         #print(x.shape)
         encoded = self.encoder(x)
         #print(encoded.shape)
         decoded = self.decoder(encoded)
-        structure_kernels: Tensor = self.post_structure_calc(encoded)
+        structure_coded: Tensor = self.post_structure_calc(x) # latent representation is (decoded, structure_coded)
+
+
+        structure_kernels = self.post_structure_recover(structure_coded)
         batch_dim = structure_kernels.shape[0]
         #print(batch_dim, x.shape, structure_kernels.shape)
         decoded = nn.functional.conv2d(decoded.reshape((-1, 273, 273)), structure_kernels.reshape((batch_dim,-1,) + structure_kernels.shape[2:]), padding=0, groups=batch_dim).unsqueeze(1)
         decoded = decoded[:,:,:256, :256]
         decoded = nn.functional.sigmoid(decoded)
         #print(decoded.shape)
-        return decoded
+        return decoded.to(torch.float32)
 
 def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Module, opt: torch.optim.Optimizer, writer: SummaryWriter, starti, stop=99999999, write_tensorboard=True, batch_size=1024, subcycles=2):
     loss_nums = []
     for subcycle_i in range(subcycles): # increase number of per-epoch cycles if training is over too quickly before reloading to test
         mod.train()
+        batch_losses = []
         for batch, x in enumerate(dataloader):
             input_batch = x
             input_batch = torch.squeeze(input_batch, 1)
@@ -151,28 +171,29 @@ def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Mo
                 #print(input_batch.shape, "vs", prediction.shape)
                 #print(input_batch.shape, prediction.shape)
                 assert prediction.shape == input_batch.shape, f"Prediction was shape {prediction.shape}, should be {input_batch.shape}"
-                calculated_loss = loss(prediction, input_batch)
+                calculated_loss = (loss(prediction.to(torch.float32), input_batch) + mse_loss(prediction, input_batch) * 100.0) * 0.5
 
                 opt.zero_grad()
                 calculated_loss.backward()
                 opt.step()
                 loss_nums.append(calculated_loss.item())
                 rep_losses.append(calculated_loss.item())
-
+                batch_losses.append(calculated_loss.item())
+                batch_losses = batch_losses[-max(len(batch_losses), 32):]
 
                 if write_tensorboard:
-                    writer.add_scalar("Loss/TrainFine", calculated_loss.item(), (starti + subcycle_i * (len(data_files) / batch_size) + batch) * 1 + rep)
+                    writer.add_scalar("Loss/TrainFine", calculated_loss.item() / 100, (starti + subcycle_i * (len(data_files) / batch_size) + batch) * 1 + rep)
                     writer.flush()
 
-            if batch % 4 == 0:
-                print(f"[{int(batch / (len(data_files) / batch_size) * 100):>2d}%]Batch {batch:0>5} ({batch * batch_size} images procd) - loss {float(np.mean(np.array(rep_losses)))}")
+            if batch % 32 == 0:
+                print(f"[{int(batch / (len(data_files) / batch_size) * 100):>2d}%]Batch {batch:0>5} ({batch * batch_size} images procd) - loss {float(np.mean(np.array(batch_losses)))}")
             if batch % math.floor(10000/batch_size) == 0:
                 disp_im = load_tile(data_files[random.randrange(0, len(data_files))], device)
                 imshow(disp_im.squeeze(0), model(disp_im).squeeze(0))
                 if write_tensorboard:
                     fig, axes = plt.subplots(1,2)
                     axes[0].imshow(get_im(disp_im.squeeze(0)))
-                    axes[1].imshow(get_im(model(disp_im)[0]))
+                    axes[1].imshow(get_im(model(disp_im)[0].to(device, torch.float32)))
                     writer.add_figure("PartialResult", fig, int(batch / math.floor(10000/batch_size)))
                 
             if batch * batch_size > stop:
@@ -204,6 +225,10 @@ def test(dataloader: DataLoader, mod: nn.Module, loss: nn.Module):
     #print(f"Avg loss: {test_loss:>8f}")
     return test_loss
 
+class SSIM_Loss(pytorch_msssim.SSIM):
+    def forward(self, X: Tensor, Y: Tensor) -> Tensor:
+        return 100*(1-super(SSIM_Loss, self).forward(X,Y))
+
 if __name__ == '__main__':
     CURR_FIGURE = None
     print("is_main")
@@ -234,14 +259,15 @@ if __name__ == '__main__':
     torch.set_default_device(device)
 
     torch.cuda.empty_cache()
-    #model = EncNet().to(device)
+    model = EncNet().to(device)
 
     # uncomment and adjust path to load checkpointed model
-    model = torch.load("models/height10_ep4.pt2", weights_only=False).to(device)
+    model = torch.load("models/height12_ep0.pt2", weights_only=False).to(device)
 
     orig_model = model.cpu()
 
-    loss_fn = nn.MSELoss()
+    loss_fn = SSIM_Loss(data_range=1, size_average=True, channel=1, win_size=11, nonnegative_ssim=True)
+    mse_loss = torch.nn.MSELoss()
     current_learning_rate = 1e-3 # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True) # lr?
 
@@ -326,17 +352,17 @@ if __name__ == '__main__':
         batch_size = improvement_scaled[0][1]
         current_learning_rate = improvement_scaled[0][0]  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
     else:
-        current_learning_rate = 1e-4
+        current_learning_rate = 1e-5
         batch_size = 64
         model = orig_model.cuda(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
+    optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True, weight_decay=1e-5)  # lr?
     data_loader = torch.utils.data.DataLoader(
         HeightTileDataset(data_files, device),
         batch_size=batch_size,  # first dimension of matrices sent,
         shuffle=True,  # randomize order
         generator=torch.Generator(device),  # load to GPU
-        num_workers=12, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
-        prefetch_factor=2,  # increase like num_workers, same reasons
+        num_workers=10, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
+        prefetch_factor=1,  # increase like num_workers, same reasons
         pin_memory=False,  # would not work with parallelisation...
         persistent_workers=True,
         drop_last=True
@@ -353,7 +379,7 @@ if __name__ == '__main__':
         board_writer.add_figure("CurrentResult", figure=fig, global_step=i * 3 )
 
         # run training/test loop n times
-        train_iter_per_epoch = 1 if i < 2 else 2
+        train_iter_per_epoch = 1 if i < 2 else 1
         for j in range(train_iter_per_epoch):
             print(f"-------------\n[[{int(j/train_iter_per_epoch * 100.0):>2d}%]]\n-----------")
 
@@ -383,11 +409,11 @@ if __name__ == '__main__':
             board_writer.flush()
         # save full model (encode+decode, need class definition to load, but weights are saved)
         # should be 24.0MiB
-        torch.save(model, f"models/height10_ep{i}.pt2")
+        torch.save(model, f"models/height12_ep{i}.pt2")
 
         try:
             export = torch.export.export(model, (load_tile(fname, device), ))
-            torch.export.save(export, f"models/height10_ep{i}_export.pt2")
+            torch.export.save(export, f"models/height12_ep{i}_export.pt2")
         except Exception as e:
             print("Error exporting: ", e)
 
