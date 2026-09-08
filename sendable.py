@@ -73,12 +73,12 @@ class HeightTileDataset(torch.utils.data.Dataset):
 
 
 image_size = 256 # image side length
-latent_dims = 3*1024 # ~= number of float32 values to compress into
-deep_n = 4096 # width of hidden deep layers
+latent_dims = 3*512 # ~= number of float32 values to compress into
+deep_n = 2048 # width of hidden deep layers
 
 post_structure_ksize = 17
-post_structure_deep_n = 2048
-post_structure_latent = 1024
+post_structure_deep_n = 1024
+post_structure_latent = 512
 
 ksize = 8 # main convolution kernel size
 stride = 2 # main convolution kernel stride
@@ -122,8 +122,10 @@ class EncNet(nn.Module):
         self.post_structure_calc = nn.Sequential(
             nn.Conv2d(1,4,15,7),
             nn.LeakyReLU(),
+            nn.Conv2d(4,2,7,2),
+            nn.LeakyReLU(),
             nn.Flatten(),
-            nn.Linear(4*35*35, post_structure_deep_n),
+            nn.Linear(2*15*15, post_structure_deep_n),
             nn.LeakyReLU(),
             nn.Linear(post_structure_deep_n, post_structure_deep_n),
             nn.LeakyReLU(),
@@ -171,7 +173,7 @@ def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Mo
                 #print(input_batch.shape, "vs", prediction.shape)
                 #print(input_batch.shape, prediction.shape)
                 assert prediction.shape == input_batch.shape, f"Prediction was shape {prediction.shape}, should be {input_batch.shape}"
-                calculated_loss = (loss(prediction.to(torch.float32), input_batch) + mse_loss(prediction, input_batch) * 100.0) * 0.5
+                calculated_loss = (loss(prediction.to(torch.float32), input_batch) * mse_loss(prediction, input_batch) * 100.0)
 
                 opt.zero_grad()
                 calculated_loss.backward()
@@ -182,7 +184,7 @@ def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Mo
                 batch_losses = batch_losses[-max(len(batch_losses), 32):]
 
                 if write_tensorboard:
-                    writer.add_scalar("Loss/TrainFine", calculated_loss.item() / 100, (starti + subcycle_i * (len(data_files) / batch_size) + batch) * 1 + rep)
+                    writer.add_scalar("Loss/TrainFine", calculated_loss.item(), (starti + subcycle_i * (len(data_files) / batch_size) + batch) * 1 + rep)
                     writer.flush()
 
             if batch % 32 == 0:
@@ -225,7 +227,7 @@ def test(dataloader: DataLoader, mod: nn.Module, loss: nn.Module):
     #print(f"Avg loss: {test_loss:>8f}")
     return test_loss
 
-class SSIM_Loss(pytorch_msssim.SSIM):
+class SSIM_Loss(pytorch_msssim.MS_SSIM):
     def forward(self, X: Tensor, Y: Tensor) -> Tensor:
         return 100*(1-super(SSIM_Loss, self).forward(X,Y))
 
@@ -262,11 +264,11 @@ if __name__ == '__main__':
     model = EncNet().to(device)
 
     # uncomment and adjust path to load checkpointed model
-    model = torch.load("models/height12_ep0.pt2", weights_only=False).to(device)
+    # model = torch.load("models/height13_epX.pt2", weights_only=False).to(device)
 
     orig_model = model.cpu()
 
-    loss_fn = SSIM_Loss(data_range=1, size_average=True, channel=1, win_size=11, nonnegative_ssim=True)
+    loss_fn = SSIM_Loss(data_range=1, size_average=True, channel=1, win_size=11)
     mse_loss = torch.nn.MSELoss()
     current_learning_rate = 1e-3 # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True) # lr?
@@ -283,7 +285,7 @@ if __name__ == '__main__':
         persistent_workers=False) # make workers resident
     print("finding appropriate metaparameters")
     metaparam_data = []
-    autodetect_metaparameters = False
+    autodetect_metaparameters = False # set to True to test different batch sizes before training
     autodetect_n_img = 1024*64
     if autodetect_metaparameters:
         losses = {}
@@ -352,10 +354,11 @@ if __name__ == '__main__':
         batch_size = improvement_scaled[0][1]
         current_learning_rate = improvement_scaled[0][0]  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
     else:
-        current_learning_rate = 1e-5
-        batch_size = 64
+        # if not using autodetection, enter learning rate and batch size here
+        current_learning_rate = 1e-4
+        batch_size = 64 # powers of two are generally useful, for reference: 64 batch_size * 10 num_workers fits easily in 8GB VRAM
         model = orig_model.cuda(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True, weight_decay=1e-5)  # lr?
+    optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True, weight_decay=1e-6)  # lr?
     data_loader = torch.utils.data.DataLoader(
         HeightTileDataset(data_files, device),
         batch_size=batch_size,  # first dimension of matrices sent,
@@ -409,11 +412,11 @@ if __name__ == '__main__':
             board_writer.flush()
         # save full model (encode+decode, need class definition to load, but weights are saved)
         # should be 24.0MiB
-        torch.save(model, f"models/height12_ep{i}.pt2")
+        torch.save(model, f"models/height13_ep{i}.pt2")
 
         try:
             export = torch.export.export(model, (load_tile(fname, device), ))
-            torch.export.save(export, f"models/height12_ep{i}_export.pt2")
+            torch.export.save(export, f"models/height13_ep{i}_export.pt2")
         except Exception as e:
             print("Error exporting: ", e)
 

@@ -16,7 +16,8 @@ dependencies = [
     "requests (>=2.34.0, <2.35)",
     "onnxscript",
     "onnxruntime-gpu",
-    "pytorch-msssim"
+    "pytorch-msssim",
+    "graphviz (>=0.21,<0.22)"
 ]
 
 [build-system]
