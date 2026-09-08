@@ -32,9 +32,8 @@ def download_tile(datafolder,url):
 
 if __name__ == "__main__":
     env = os.environ.copy()
-    data_folder = env.get("DATADIR")
     raw_folder = env.get("RAWDIR")
-    print(data_folder, raw_folder)
+    print(raw_folder)
     
     with open("data/swisstopo_links.csv", "r") as link_list:
         links = link_list.readlines()

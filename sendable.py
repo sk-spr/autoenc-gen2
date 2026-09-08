@@ -244,7 +244,7 @@ if __name__ == '__main__':
     learning_rate_candidates = [1e-6, 1e-5]
 
     # set the glob expression for the input tif tiles
-    tile_folders = ["/run/media/skye/backup31/data/switzerland_tiles/18/*/*.tif", "/run/media/skye/GenericStorage/data/tirol_tiles/part*/18/*/*.tif", "/home/skye/data/swit_tiles2/18/*/*.tif"]
+    tile_folders = ["data/tiles"]# + ["/run/media/skye/backup31/data/switzerland_tiles/18/*/*.tif", "/run/media/skye/GenericStorage/data/tirol_tiles/part*/18/*/*.tif", "/home/skye/data/swit_tiles2/18/*/*.tif"]
     zoom_level = "**"
     data_files = []
     for glob_expr in tile_folders:
