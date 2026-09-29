@@ -8,6 +8,7 @@ from asyncio import Task
 import pytorch_msssim
 import tensorboard
 from pytorch_msssim import ms_ssim
+from torch.amp import custom_fwd
 from torch.multiprocessing import freeze_support
 import numpy as np
 
@@ -73,12 +74,12 @@ class HeightTileDataset(torch.utils.data.Dataset):
 
 
 image_size = 256 # image side length
-latent_dims = 3*512 # ~= number of float32 values to compress into
-deep_n = 2048 # width of hidden deep layers
+latent_dims = 3*512*2 # ~= number of float32 values to compress into
+deep_n = 2048*2 # width of hidden deep layers
 
 post_structure_ksize = 17
-post_structure_deep_n = 1024
-post_structure_latent = 512
+post_structure_deep_n = 1024*2
+post_structure_latent = 512*2
 
 ksize = 8 # main convolution kernel size
 stride = 2 # main convolution kernel stride
@@ -122,10 +123,10 @@ class EncNet(nn.Module):
         self.post_structure_calc = nn.Sequential(
             nn.Conv2d(1,4,15,7),
             nn.LeakyReLU(),
-            nn.Conv2d(4,2,7,2),
+            nn.Conv2d(4,2,7,1),
             nn.LeakyReLU(),
             nn.Flatten(),
-            nn.Linear(2*15*15, post_structure_deep_n),
+            nn.Linear(2*29*29, post_structure_deep_n),
             nn.LeakyReLU(),
             nn.Linear(post_structure_deep_n, post_structure_deep_n),
             nn.LeakyReLU(),
@@ -159,7 +160,7 @@ class EncNet(nn.Module):
         #print(decoded.shape)
         return decoded.to(torch.float32)
 
-def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Module, opt: torch.optim.Optimizer, writer: SummaryWriter, starti, stop=99999999, write_tensorboard=True, batch_size=1024, subcycles=2):
+def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Module, opt: torch.optim.Optimizer, writer: SummaryWriter, starti, stop=99999999, write_tensorboard=True, batch_size=1024, subcycles=2, scaler=torch.amp.GradScaler("cuda")):
     loss_nums = []
     for subcycle_i in range(subcycles): # increase number of per-epoch cycles if training is over too quickly before reloading to test
         mod.train()
@@ -169,22 +170,29 @@ def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Mo
             input_batch = torch.squeeze(input_batch, 1)
             rep_losses = []
             for rep in range(1):
+                #with torch.autocast("cuda", torch.float32):
+
                 prediction = mod(input_batch)
                 #print(input_batch.shape, "vs", prediction.shape)
                 #print(input_batch.shape, prediction.shape)
                 assert prediction.shape == input_batch.shape, f"Prediction was shape {prediction.shape}, should be {input_batch.shape}"
-                calculated_loss = (loss(prediction.to(torch.float32), input_batch) * mse_loss(prediction, input_batch) * 100.0)
+                loss1 = loss(prediction.float(), input_batch)
+                loss2 = mse_loss(prediction.float(), input_batch) * 100
+                #calculated_loss = (loss(prediction.float(), input_batch) * 0.01 + mse_loss(prediction.float(), input_batch))
+                calculated_loss = loss1.item() + loss2.item()
+                scaler.scale(loss1).backward(retain_graph=True)
+                scaler.scale(loss2).backward()
+                scaler.step(opt)
+                scaler.update()
+                #opt.zero_grad()
 
-                opt.zero_grad()
-                calculated_loss.backward()
-                opt.step()
-                loss_nums.append(calculated_loss.item())
-                rep_losses.append(calculated_loss.item())
-                batch_losses.append(calculated_loss.item())
+                loss_nums.append(calculated_loss)
+                rep_losses.append(calculated_loss)
+                batch_losses.append(calculated_loss)
                 batch_losses = batch_losses[-max(len(batch_losses), 32):]
 
                 if write_tensorboard:
-                    writer.add_scalar("Loss/TrainFine", calculated_loss.item(), (starti + subcycle_i * (len(data_files) / batch_size) + batch) * 1 + rep)
+                    writer.add_scalar("Loss/TrainFine", calculated_loss, (starti + subcycle_i * (len(data_files) / batch_size) + batch) * 1 + rep)
                     writer.flush()
 
             if batch % 32 == 0:
@@ -228,6 +236,7 @@ def test(dataloader: DataLoader, mod: nn.Module, loss: nn.Module):
     return test_loss
 
 class SSIM_Loss(pytorch_msssim.MS_SSIM):
+
     def forward(self, X: Tensor, Y: Tensor) -> Tensor:
         return 100*(1-super(SSIM_Loss, self).forward(X,Y))
 
@@ -235,6 +244,8 @@ if __name__ == '__main__':
     CURR_FIGURE = None
     print("is_main")
     freeze_support()
+
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
     torch.multiprocessing.set_start_method('spawn')
     board_writer = SummaryWriter("./runs/")
 
@@ -244,7 +255,7 @@ if __name__ == '__main__':
     learning_rate_candidates = [1e-6, 1e-5]
 
     # set the glob expression for the input tif tiles
-    tile_folders = ["data/tiles"]# + ["/run/media/skye/backup31/data/switzerland_tiles/18/*/*.tif", "/run/media/skye/GenericStorage/data/tirol_tiles/part*/18/*/*.tif", "/home/skye/data/swit_tiles2/18/*/*.tif"]
+    tile_folders = ["/run/media/skye/backup31/dat/switzerland_tiles/18/*/*.tif"]
     zoom_level = "**"
     data_files = []
     for glob_expr in tile_folders:
@@ -264,101 +275,16 @@ if __name__ == '__main__':
     model = EncNet().to(device)
 
     # uncomment and adjust path to load checkpointed model
-    # model = torch.load("models/height13_epX.pt2", weights_only=False).to(device)
+    model = torch.load("models/height14_ep13.pt2", weights_only=False).to(device)
 
-    orig_model = model.cpu()
 
     loss_fn = SSIM_Loss(data_range=1, size_average=True, channel=1, win_size=11)
     mse_loss = torch.nn.MSELoss()
-    current_learning_rate = 1e-3 # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
-    optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True) # lr?
-
-    print("Initializing dataloader")
-    batch_size = 256 # tweak batch_size to get high standby vram utilisation
+    current_learning_rate = 1e-4
+    batch_size = 32 # powers of two are generally useful, for reference: 64 batch_size * 10 num_workers fits easily in 8GB VRAM
     loss_hist = []
-    data_loader = torch.utils.data.DataLoader(
-        HeightTileDataset(data_files, device),
-        batch_size=batch_size, # first dimension of matrices sent,
-        shuffle=True, # randomize order
-        generator=torch.Generator(device), # load to GPU
-        pin_memory=False, # would not work with parallelisation...
-        persistent_workers=False) # make workers resident
-    print("finding appropriate metaparameters")
-    metaparam_data = []
-    autodetect_metaparameters = False # set to True to test different batch sizes before training
-    autodetect_n_img = 1024*64
-    if autodetect_metaparameters:
-        losses = {}
 
-        for batch_size_candidate in batch_options:
-            print(f"Trying batches with n={batch_size_candidate} ...")
-
-
-            data_loader = torch.utils.data.DataLoader(
-                HeightTileDataset(data_files[:autodetect_n_img], device),
-                batch_size=batch_size_candidate,  # first dimension of matrices sent,
-                shuffle=True,  # randomize order
-                generator=torch.Generator(device),  # load to GPU
-                num_workers=4,
-                # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
-                prefetch_factor=2,  # increase like num_workers, same reasons
-                pin_memory=False,  # would not work with parallelisation...
-                persistent_workers=True)  # make workers resident
-            for learning_rate_candidate in learning_rate_candidates:
-                print(f"learning rate {learning_rate_candidate}")
-                model = EncNet().to(device)
-                model.zero_grad()
-
-                torch.cuda.empty_cache()
-
-                current_learning_rate = learning_rate_candidate  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
-                optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
-                before_train = time.time()
-                train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, 0, autodetect_n_img, False, batch_size_candidate)
-                train_duration = time.time() - before_train
-
-                curve_fit_x = np.linspace(0, len(train_losses), len(train_losses))
-                curve_fit_y = np.array(train_losses)
-                fitted_poly = np.polyfit(curve_fit_x, curve_fit_y, 3)
-                curve_points = np.poly1d(fitted_poly)(curve_fit_x)
-                delta_real_fit = np.square(curve_points - curve_fit_y)
-                f, a = plt.subplots(2,1)
-                a[0].plot(curve_fit_y, color="red")
-                a[0].plot(curve_points, color="green")
-                a[1].plot(delta_real_fit)
-                f.show()
-                print(float(np.mean(delta_real_fit)))
-                mean_start = float(np.mean(np.array(train_losses[:5])))
-                mean_end = float(np.mean(np.array(train_losses[-5:])))
-                metaparam_data.append((learning_rate_candidate, batch_size_candidate,mean_end - mean_start, train_duration, float(np.mean(delta_real_fit))))
-                print(metaparam_data[-1])
-                losses[f"lr_{learning_rate_candidate}_bs_{batch_size_candidate}"] = train_losses
-                print(f"LR {learning_rate_candidate}, Batch Size {batch_size_candidate}: Improved by {mean_end - mean_start} with variance {float(np.mean(delta_real_fit))} in {train_duration} seconds")
-                data = train_losses
-                for datum_i in range(len(data)):
-                    board_writer.add_scalar(f"Loss/Meta/lr_{learning_rate_candidate}_bs_{batch_size_candidate}", data[datum_i], datum_i)
-
-                    board_writer.flush()
-        metaparam_data.sort(key=lambda x: x[2])
-
-        print([f"LR {r[0]}, Batch Size {r[1]}: Improved by {r[2]} with variance {r[4]} in {r[3]} seconds\n" for r in metaparam_data])
-        improvement_scaled = [(l[0], l[1], (l[2] / l[3]) * 100 / l[4]) for l in metaparam_data]
-        for batch_size_candidate in batch_options:
-            print(f"Results for batch size {batch_size_candidate}")
-            for learning_rate_candidate in learning_rate_candidates:
-                datum = [row for row in improvement_scaled if row[0] == learning_rate_candidate and row[1] == batch_size_candidate][0]
-                print(f"[{batch_size_candidate}-batches at LR {learning_rate_candidate}]: score={datum[2]}")
-        improvement_scaled.sort(key=lambda x: x[2], reverse=False)
-
-        print(improvement_scaled)
-        batch_size = improvement_scaled[0][1]
-        current_learning_rate = improvement_scaled[0][0]  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
-    else:
-        # if not using autodetection, enter learning rate and batch size here
-        current_learning_rate = 1e-4
-        batch_size = 64 # powers of two are generally useful, for reference: 64 batch_size * 10 num_workers fits easily in 8GB VRAM
-        model = orig_model.cuda(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True, weight_decay=1e-6)  # lr?
+    optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True, weight_decay=1e-5)  # lr?
     data_loader = torch.utils.data.DataLoader(
         HeightTileDataset(data_files, device),
         batch_size=batch_size,  # first dimension of matrices sent,
@@ -388,7 +314,7 @@ if __name__ == '__main__':
 
             num_train_subcycles = 1 if i < 1 else 1
             tick = time.time()
-            train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, (i * train_iter_per_epoch + j) * 1 * (len(data_files) / batch_size), len(data_files), True, batch_size, num_train_subcycles)
+            train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, (i * train_iter_per_epoch + j) * 1 * (len(data_files) / batch_size), len(data_files), True, batch_size, num_train_subcycles,scaler=scaler)
             time_full_train = (time.time() - tick) / (len(data_files) * num_train_subcycles) # FIXME pull this scalar from the same place as train() subepoch count
             print(f"average {(time_full_train * 1000):2<5f}ms training time per image (approx)")
             loss_hist = loss_hist + train_losses
@@ -412,11 +338,11 @@ if __name__ == '__main__':
             board_writer.flush()
         # save full model (encode+decode, need class definition to load, but weights are saved)
         # should be 24.0MiB
-        torch.save(model, f"models/height13_ep{i}.pt2")
+        torch.save(model, f"models/height14_ep{i}.pt2")
 
         try:
             export = torch.export.export(model, (load_tile(fname, device), ))
-            torch.export.save(export, f"models/height13_ep{i}_export.pt2")
+            torch.export.save(export, f"models/height14_ep{i}_export.pt2")
         except Exception as e:
             print("Error exporting: ", e)
 
