@@ -4,6 +4,7 @@ import os
 import random
 import time
 from asyncio import Task
+from typing import Optional, List, Union, Tuple
 
 import pytorch_msssim
 import tensorboard
@@ -54,7 +55,7 @@ def imshow(tensorA, tensorB, title=None):
 
     if title is not None:
         ax[0].title(title)
-    fig.show()
+    #fig.show()
     CURR_FIGURE = fig
 
 
@@ -74,27 +75,21 @@ class HeightTileDataset(torch.utils.data.Dataset):
 
 
 image_size = 256 # image side length
-latent_dims = 3*512*2 # ~= number of float32 values to compress into
-deep_n = 2048*2 # width of hidden deep layers
+latent_dims = 2048 # ~= number of float32 values to compress into
+deep_n = 4096 # width of hidden deep layers
 
-post_structure_ksize = 17
-post_structure_deep_n = 1024*2
-post_structure_latent = 512*2
-
-ksize = 8 # main convolution kernel size
-stride = 2 # main convolution kernel stride
-padding = 3 # main convolution kernel application padding
-hout = (image_size + 2 * padding - (ksize - 1))/stride
 class EncNet(nn.Module):
     def __init__(self):
         super().__init__()
         # encoder: image -> latent_dims * 4 bytes
         self.encoder = nn.Sequential(
             nn.Conv2d(1, 8, 9, stride=3, padding=0),
-            nn.LeakyReLU(),
             nn.MaxPool2d(8, stride=2),
+            nn.LeakyReLU(),
+            nn.BatchNorm2d(8),
             nn.Conv2d(8, 4, 3, stride=1, padding=1),
             nn.LeakyReLU(),
+            nn.BatchNorm2d(4),
             nn.Flatten(),
             nn.Linear(4*38*38, deep_n), # output is shape (4,128,128)
             nn.LeakyReLU(),
@@ -112,61 +107,47 @@ class EncNet(nn.Module):
             nn.Linear(deep_n, 4*33*33),
             nn.LeakyReLU(),
             nn.Unflatten(1, (4,33,33)),
-            nn.ConvTranspose2d(4,8,3,stride=2,padding=1,output_padding=0),
+            nn.Conv2d(4,8,3,padding="same"),
             nn.LeakyReLU(),
-            nn.ConvTranspose2d(8,8,13,stride=4,padding=0,output_padding=0),
+            nn.Upsample((266,266)),
             nn.LeakyReLU(),
-            nn.ConvTranspose2d(8,8,5,stride=1,padding=0,output_padding=0),
-            nn.LeakyReLU()
-        )
-
-        self.post_structure_calc = nn.Sequential(
-            nn.Conv2d(1,4,15,7),
+            nn.Conv2d(8,4,11, padding=3),
             nn.LeakyReLU(),
-            nn.Conv2d(4,2,7,1),
-            nn.LeakyReLU(),
-            nn.Flatten(),
-            nn.Linear(2*29*29, post_structure_deep_n),
-            nn.LeakyReLU(),
-            nn.Linear(post_structure_deep_n, post_structure_deep_n),
-            nn.LeakyReLU(),
-            nn.Linear(post_structure_deep_n, post_structure_latent),
-            nn.LeakyReLU(),
-        )
-
-        self.post_structure_recover = nn.Sequential(
-            nn.Linear(post_structure_latent, post_structure_deep_n),
-            nn.LeakyReLU(),
-            nn.Linear(post_structure_deep_n, post_structure_deep_n),
-            nn.LeakyReLU(),
-            nn.Linear(post_structure_deep_n, 8 * post_structure_ksize * post_structure_ksize),
-            nn.LeakyReLU(),
-            nn.Unflatten(1, (8,post_structure_ksize,post_structure_ksize))
+            nn.Conv2d(4,1,11,padding=2),
+            nn.Sigmoid()
         )
     def forward(self, x: Tensor):
         #print(x.shape)
         encoded = self.encoder(x)
         #print(encoded.shape)
         decoded = self.decoder(encoded)
-        structure_coded: Tensor = self.post_structure_calc(x) # latent representation is (decoded, structure_coded)
 
-
-        structure_kernels = self.post_structure_recover(structure_coded)
-        batch_dim = structure_kernels.shape[0]
-        #print(batch_dim, x.shape, structure_kernels.shape)
-        decoded = nn.functional.conv2d(decoded.reshape((-1, 273, 273)), structure_kernels.reshape((batch_dim,-1,) + structure_kernels.shape[2:]), padding=0, groups=batch_dim).unsqueeze(1)
-        decoded = decoded[:,:,:256, :256]
-        decoded = nn.functional.sigmoid(decoded)
         #print(decoded.shape)
-        return decoded.to(torch.float32)
+        return decoded
+def save_collage(originals, outputs, n_step, vanity_folder):
+    fig, axes = plt.subplots(9,12, figsize=(1200, 900, "px"), layout="tight")
+    for row in range(9):
+        for col in range(6):
+            ims = [originals[row * 6 + col], outputs[row * 6 + col]]
+            for im_n in range(2):
+                ax = axes[row, col * 2 + im_n]
 
-def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Module, opt: torch.optim.Optimizer, writer: SummaryWriter, starti, stop=99999999, write_tensorboard=True, batch_size=1024, subcycles=2, scaler=torch.amp.GradScaler("cuda")):
+                ax.imshow(ims[im_n], extent=(0,256,0,256))
+                ax.set_axis_off()
+    fig.savefig(f"{vanity_folder}/step{n_step:08d}.png")
+
+    plt.close(fig)
+
+def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Module, opt: torch.optim.Optimizer, writer: SummaryWriter, starti, stop=99999999, write_tensorboard=True, batch_size=1024, subcycles=2, scaler=torch.amp.GradScaler("cuda"), epoch_num = 0, animation = False):
     loss_nums = []
     for subcycle_i in range(subcycles): # increase number of per-epoch cycles if training is over too quickly before reloading to test
         mod.train()
         batch_losses = []
+        test_ims = []
         for batch, x in enumerate(dataloader):
             input_batch = x
+            if batch == 0:
+                test_ims = x[:54,:,:,:]
             input_batch = torch.squeeze(input_batch, 1)
             rep_losses = []
             for rep in range(1):
@@ -176,12 +157,9 @@ def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Mo
                 #print(input_batch.shape, "vs", prediction.shape)
                 #print(input_batch.shape, prediction.shape)
                 assert prediction.shape == input_batch.shape, f"Prediction was shape {prediction.shape}, should be {input_batch.shape}"
-                loss1 = loss(prediction.float(), input_batch)
-                loss2 = mse_loss(prediction.float(), input_batch) * 100
-                #calculated_loss = (loss(prediction.float(), input_batch) * 0.01 + mse_loss(prediction.float(), input_batch))
-                calculated_loss = loss1.item() + loss2.item()
-                scaler.scale(loss1).backward(retain_graph=True)
-                scaler.scale(loss2).backward()
+                loss1 = loss(prediction, input_batch)
+                calculated_loss = loss1.item()
+                scaler.scale(loss1).backward()
                 scaler.step(opt)
                 scaler.update()
                 #opt.zero_grad()
@@ -189,7 +167,7 @@ def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Mo
                 loss_nums.append(calculated_loss)
                 rep_losses.append(calculated_loss)
                 batch_losses.append(calculated_loss)
-                batch_losses = batch_losses[-max(len(batch_losses), 32):]
+                batch_losses = batch_losses[-min(len(batch_losses), 32):]
 
                 if write_tensorboard:
                     writer.add_scalar("Loss/TrainFine", calculated_loss, (starti + subcycle_i * (len(data_files) / batch_size) + batch) * 1 + rep)
@@ -197,6 +175,9 @@ def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Mo
 
             if batch % 32 == 0:
                 print(f"[{int(batch / (len(data_files) / batch_size) * 100):>2d}%]Batch {batch:0>5} ({batch * batch_size} images procd) - loss {float(np.mean(np.array(batch_losses)))}")
+            if batch % 16 == 0 and animation:
+                im_batch = model(test_ims.squeeze(1).cuda())
+                save_collage([get_im(test_ims[im].squeeze(0)) for im in range(len(test_ims))], [get_im(im_batch[im].squeeze(0)) for im in range(len(test_ims))], batch // 4, f"vanity{epoch_num:02}")
             if batch % math.floor(10000/batch_size) == 0:
                 disp_im = load_tile(data_files[random.randrange(0, len(data_files))], device)
                 imshow(disp_im.squeeze(0), model(disp_im).squeeze(0))
@@ -235,27 +216,43 @@ def test(dataloader: DataLoader, mod: nn.Module, loss: nn.Module):
     #print(f"Avg loss: {test_loss:>8f}")
     return test_loss
 
-class SSIM_Loss(pytorch_msssim.MS_SSIM):
+class DeviationCorrectedLoss(pytorch_msssim.MS_SSIM):
+    def __init__(
+        self,
+        data_range: float = 255,
+        size_average: bool = True,
+        win_size: int = 11,
+        win_sigma: float = 1.5,
+        channel: int = 3,
+        spatial_dims: int = 2,
+        weights: Optional[List[float]] = None,
+        K: Union[Tuple[float, float], List[float]] = (0.01, 0.03),
+    ):
+        super(DeviationCorrectedLoss, self).__init__(data_range, size_average, win_size, win_sigma, channel, spatial_dims, weights, K)
+        self.mse_loss = nn.MSELoss(size_average)
+
 
     def forward(self, X: Tensor, Y: Tensor) -> Tensor:
-        return 100*(1-super(SSIM_Loss, self).forward(X,Y))
+        X_deviation = X.std(3)
+        X_mean = X.mean(dim=3)
+        Y_deviation = Y.std(3)
+        Y_mean = Y.mean(dim=3)
+        delta_mean = ((Y_mean - X_mean) * 2) ** 2
+        #print(delta_mean.mean(), (((Y_mean - X_mean) * 5) ** 2).mean())
+        delta_deviation = ((Y_deviation - X_deviation) * 10)
+        return 0.25 * (((1 - super(DeviationCorrectedLoss, self).forward(X, Y)) * 200) + (self.mse_loss(X,Y) * 200) + delta_deviation.mean() + delta_mean.mean())
 
 if __name__ == '__main__':
     CURR_FIGURE = None
     print("is_main")
     freeze_support()
 
-    scaler = torch.amp.GradScaler("cuda", enabled=False)
+    scaler = torch.amp.GradScaler("cuda")
     torch.multiprocessing.set_start_method('spawn')
     board_writer = SummaryWriter("./runs/")
 
-    # possible batch sizes to test
-    batch_options = [2048, 4096, 8192]
-    # possible learning rates
-    learning_rate_candidates = [1e-6, 1e-5]
-
     # set the glob expression for the input tif tiles
-    tile_folders = ["/run/media/skye/backup31/dat/switzerland_tiles/18/*/*.tif"]
+    tile_folders = ["/run/media/skye/backup31/dat/switzerland_tiles/18/**/*.tif"]
     zoom_level = "**"
     data_files = []
     for glob_expr in tile_folders:
@@ -275,14 +272,17 @@ if __name__ == '__main__':
     model = EncNet().to(device)
 
     # uncomment and adjust path to load checkpointed model
-    model = torch.load("models/height14_ep13.pt2", weights_only=False).to(device)
+    #model = torch.load("models/height17_ep0.pt2", weights_only=False).to(device)
 
 
-    loss_fn = SSIM_Loss(data_range=1, size_average=True, channel=1, win_size=11)
+    loss_fn = DeviationCorrectedLoss(data_range=1, size_average=True, channel=1, win_size=11)
     mse_loss = torch.nn.MSELoss()
     current_learning_rate = 1e-4
-    batch_size = 32 # powers of two are generally useful, for reference: 64 batch_size * 10 num_workers fits easily in 8GB VRAM
+    batch_size = 64 # powers of two are generally useful, for reference: 64 batch_size * 10 num_workers fits easily in 8GB VRAM
     loss_hist = []
+
+    # whether to create 16*6 mosaics every 16 batches (same images, usable as animation)
+    make_animation_frames = False
 
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True, weight_decay=1e-5)  # lr?
     data_loader = torch.utils.data.DataLoader(
@@ -299,7 +299,7 @@ if __name__ == '__main__':
     for i in range(100):
         print(f"------------------------\nEpoch {i}")
         # each epoch contains train_iter_per_epoch cycles, each train call runs the dataset 4 times
-
+        os.mkdir(f"vanity{i:02}")
         # display current inference result
         fig, axes = plt.subplots(1, 2)
 
@@ -314,7 +314,7 @@ if __name__ == '__main__':
 
             num_train_subcycles = 1 if i < 1 else 1
             tick = time.time()
-            train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, (i * train_iter_per_epoch + j) * 1 * (len(data_files) / batch_size), len(data_files), True, batch_size, num_train_subcycles,scaler=scaler)
+            train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, (i * train_iter_per_epoch + j) * 1 * (len(data_files) / batch_size), len(data_files), True, batch_size, num_train_subcycles,scaler=scaler, epoch_num=i, animation=make_animation_frames)
             time_full_train = (time.time() - tick) / (len(data_files) * num_train_subcycles) # FIXME pull this scalar from the same place as train() subepoch count
             print(f"average {(time_full_train * 1000):2<5f}ms training time per image (approx)")
             loss_hist = loss_hist + train_losses
@@ -338,17 +338,17 @@ if __name__ == '__main__':
             board_writer.flush()
         # save full model (encode+decode, need class definition to load, but weights are saved)
         # should be 24.0MiB
-        torch.save(model, f"models/height14_ep{i}.pt2")
+        torch.save(model, f"models/height17_ep{i}.pt2")
 
         try:
             export = torch.export.export(model, (load_tile(fname, device), ))
-            torch.export.save(export, f"models/height14_ep{i}_export.pt2")
+            torch.export.save(export, f"models/height17_ep{i}_export.pt2")
         except Exception as e:
             print("Error exporting: ", e)
 
         fig, ax = plt.subplots(1,1)
         ax.plot(loss_hist)
-        fig.show()
+        #fig.show()
 
         if i % 4 == 0:
             current_learning_rate *= 1.3
