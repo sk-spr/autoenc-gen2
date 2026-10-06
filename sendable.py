@@ -94,14 +94,14 @@ class EncNet(nn.Module):
             nn.Linear(4*38*38, deep_n), # output is shape (4,128,128)
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
-            nn.LeakyReLU(),
+            nn.Sigmoid(),
             nn.Linear(deep_n, latent_dims),
-            nn.LeakyReLU()
+            nn.Sigmoid()
         )
         # decoder is pretty directly mirror, but trained independently
         self.decoder = nn.Sequential(
             nn.Linear(latent_dims, deep_n),
-            nn.LeakyReLU(),
+            nn.Sigmoid(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
             nn.Linear(deep_n, 4*33*33),
