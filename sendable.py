@@ -75,8 +75,8 @@ class HeightTileDataset(torch.utils.data.Dataset):
 
 
 image_size = 256 # image side length
-latent_dims = 2048 # ~= number of float32 values to compress into
-deep_n = 4096 # width of hidden deep layers
+latent_dims = 512 # ~= number of float32 values to compress into
+deep_n = 1024 # width of hidden deep layers
 
 class EncNet(nn.Module):
     def __init__(self):
@@ -91,7 +91,7 @@ class EncNet(nn.Module):
             nn.LeakyReLU(),
             nn.BatchNorm2d(4),
             nn.Flatten(),
-            nn.Linear(4*38*38, deep_n), # output is shape (4,128,128)
+            nn.Linear(4*38*38, deep_n),
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
@@ -111,9 +111,9 @@ class EncNet(nn.Module):
             nn.LeakyReLU(),
             nn.Upsample((266,266)),
             nn.LeakyReLU(),
-            nn.Conv2d(8,4,11, padding=3),
+            nn.Conv2d(8,4,11, padding=2),
             nn.LeakyReLU(),
-            nn.Conv2d(4,1,11,padding=2),
+            nn.Conv2d(4,1,5,padding=0),
             nn.Sigmoid()
         )
     def forward(self, x: Tensor):
@@ -216,11 +216,10 @@ def test(dataloader: DataLoader, mod: nn.Module, loss: nn.Module):
     #print(f"Avg loss: {test_loss:>8f}")
     return test_loss
 
-class DeviationCorrectedLoss(pytorch_msssim.MS_SSIM):
+class DeviationCorrectedLoss(pytorch_msssim.SSIM):
     def __init__(
         self,
-        data_range: float = 255,
-        size_average: bool = True,
+        data_range: float = 1.0,
         win_size: int = 11,
         win_sigma: float = 1.5,
         channel: int = 3,
@@ -228,8 +227,8 @@ class DeviationCorrectedLoss(pytorch_msssim.MS_SSIM):
         weights: Optional[List[float]] = None,
         K: Union[Tuple[float, float], List[float]] = (0.01, 0.03),
     ):
-        super(DeviationCorrectedLoss, self).__init__(data_range, size_average, win_size, win_sigma, channel, spatial_dims, weights, K)
-        self.mse_loss = nn.MSELoss(size_average)
+        super(DeviationCorrectedLoss, self).__init__(data_range, True, win_size, win_sigma, channel, spatial_dims, K)
+        self.mse_loss = nn.MSELoss()
 
 
     def forward(self, X: Tensor, Y: Tensor) -> Tensor:
@@ -237,9 +236,9 @@ class DeviationCorrectedLoss(pytorch_msssim.MS_SSIM):
         X_mean = X.mean(dim=3)
         Y_deviation = Y.std(3)
         Y_mean = Y.mean(dim=3)
-        delta_mean = ((Y_mean - X_mean) * 2) ** 2
+        delta_mean = ((Y_mean - X_mean) * 4) ** 2
         #print(delta_mean.mean(), (((Y_mean - X_mean) * 5) ** 2).mean())
-        delta_deviation = ((Y_deviation - X_deviation) * 10)
+        delta_deviation = ((Y_deviation - X_deviation) * 10) ** 2
         return 0.25 * (((1 - super(DeviationCorrectedLoss, self).forward(X, Y)) * 200) + (self.mse_loss(X,Y) * 200) + delta_deviation.mean() + delta_mean.mean())
 
 if __name__ == '__main__':
@@ -272,17 +271,16 @@ if __name__ == '__main__':
     model = EncNet().to(device)
 
     # uncomment and adjust path to load checkpointed model
-    #model = torch.load("models/height17_ep0.pt2", weights_only=False).to(device)
+    #model = torch.load("models/height18_ep0.pt2", weights_only=False).to(device)
 
 
-    loss_fn = DeviationCorrectedLoss(data_range=1, size_average=True, channel=1, win_size=11)
-    mse_loss = torch.nn.MSELoss()
+    loss_fn = DeviationCorrectedLoss(data_range=1, channel=1, win_size=3)
     current_learning_rate = 1e-4
-    batch_size = 64 # powers of two are generally useful, for reference: 64 batch_size * 10 num_workers fits easily in 8GB VRAM
+    batch_size = 128 # powers of two are generally useful, for reference: 64 batch_size * 10 num_workers fits easily in 8GB VRAM
     loss_hist = []
 
     # whether to create 16*6 mosaics every 16 batches (same images, usable as animation)
-    make_animation_frames = False
+    make_animation_frames = True
 
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True, weight_decay=1e-5)  # lr?
     data_loader = torch.utils.data.DataLoader(
@@ -290,7 +288,7 @@ if __name__ == '__main__':
         batch_size=batch_size,  # first dimension of matrices sent,
         shuffle=True,  # randomize order
         generator=torch.Generator(device),  # load to GPU
-        num_workers=10, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
+        num_workers=8, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
         prefetch_factor=1,  # increase like num_workers, same reasons
         pin_memory=False,  # would not work with parallelisation...
         persistent_workers=True,
@@ -338,11 +336,11 @@ if __name__ == '__main__':
             board_writer.flush()
         # save full model (encode+decode, need class definition to load, but weights are saved)
         # should be 24.0MiB
-        torch.save(model, f"models/height17_ep{i}.pt2")
+        torch.save(model, f"models/height18_ep{i}.pt2")
 
         try:
             export = torch.export.export(model, (load_tile(fname, device), ))
-            torch.export.save(export, f"models/height17_ep{i}_export.pt2")
+            torch.export.save(export, f"models/height18_ep{i}_export.pt2")
         except Exception as e:
             print("Error exporting: ", e)
 
