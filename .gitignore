@@ -1,4 +1,5 @@
 models/*.pt2
+models/*.onnx
 runs/*
 /.idea/
 data/**/*.tif
