@@ -34,7 +34,7 @@ def load_tile(fname, device):
     min_val = np.amin(im)
     max_val = np.amax(im)
     #print(max_val - min_val)
-     return torch.from_numpy((im - min_val) / (max(max_val - min_val, 1))).unsqueeze(0).to(device, torch.float32)
+    return torch.from_numpy((im - min_val) / (max(max_val - min_val, 1))).unsqueeze(0).to(device, torch.float32)
 
 unloader = transforms.ToPILImage()  # reconvert into PIL image
 
@@ -75,8 +75,8 @@ class HeightTileDataset(torch.utils.data.Dataset):
 
 
 image_size = 256 # image side length
-latent_dims = 512 # ~= number of float32 values to compress into
-deep_n = 1024 # width of hidden deep layers
+latent_dims = 1024 # ~= number of float32 values to compress into
+deep_n = 39*39 # width of hidden deep layers
 
 class EncNet(nn.Module):
     def __init__(self):
@@ -93,8 +93,6 @@ class EncNet(nn.Module):
             nn.LeakyReLU(),
             nn.BatchNorm2d(1),
             nn.Flatten(),
-            nn.Linear(1*39*39, deep_n),
-            nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
             nn.Linear(deep_n, latent_dims),
@@ -106,14 +104,11 @@ class EncNet(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
-            nn.Linear(deep_n, 1*33*33),
+            nn.Unflatten(1, (1,39,39)),
+            nn.ConvTranspose2d(1,8,13),
             nn.LeakyReLU(),
-            nn.Unflatten(1, (1,33,33)),
-            nn.Conv2d(1,4,3,padding="same"),
-            nn.LeakyReLU(),
-            nn.Upsample((266,266)),
-            nn.LeakyReLU(),
-            nn.Conv2d(4,4,11, padding=2),
+            nn.Upsample((266,266), mode="bicubic"),
+            nn.Conv2d(8,4,11, padding=2),
             nn.LeakyReLU(),
             nn.Conv2d(4,1,5,padding=0),
             nn.Sigmoid()
@@ -153,6 +148,7 @@ def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Mo
                 test_ims = x[:54,:,:,:]
             input_batch = torch.squeeze(input_batch, 1)
             rep_losses = []
+            train_tick = time.time_ns()
             for rep in range(1):
                 prediction = mod(input_batch)
                 #print(input_batch.shape, "vs", prediction.shape)
@@ -173,20 +169,23 @@ def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Mo
                 if write_tensorboard:
                     writer.add_scalar("Loss/TrainFine", calculated_loss, (starti + subcycle_i * (len(data_files) / batch_size) + batch) * 1 + rep)
                     writer.flush()
-
+            train_time_ms = (time.time_ns() - train_tick) / 1000000
             if batch % 32 == 0:
-                print(f"[{int(batch / (len(data_files) / batch_size) * 100):>2d}%]Batch {batch:0>5} ({batch * batch_size} images procd) - loss {float(np.mean(np.array(batch_losses)))}")
+                print(f"[{int(batch / (len(data_files) / batch_size) * 100):>2d}%]Batch {batch:0>5} ({batch * batch_size} images procd) - loss {float(np.mean(np.array(batch_losses)))} in {train_time_ms / batch_size} ms per image")
             if batch % 16 == 0 and animation:
                 im_batch = model(test_ims.squeeze(1).cuda())
                 save_collage([get_im(test_ims[im].squeeze(0).to(torch.float32)) for im in range(len(test_ims))], [get_im(im_batch[im].squeeze(0).to(torch.float32)) for im in range(len(test_ims))], batch // 4, f"vanity{epoch_num:02}")
-            if batch % math.floor(10000/batch_size) == 0:
-                disp_im = load_tile(data_files[random.randrange(0, len(data_files))], device)
-                imshow(disp_im.squeeze(0).float(), model(disp_im).squeeze(0).float())
+            if batch % 64 == 0:
                 if write_tensorboard:
-                    fig, axes = plt.subplots(1,2)
-                    axes[0].imshow(get_im(disp_im.squeeze(0).float()))
-                    axes[1].imshow(get_im(model(disp_im)[0].to(device, torch.float32)))
-                    writer.add_figure("PartialResult", fig, int(batch / math.floor(10000/batch_size)))
+                    preview_ims = [load_tile(data_files[random.randrange(0, len(data_files))], device) for im_i in
+                                   range(3)]
+                    fig, axes = plt.subplots(1,6, layout="tight", figsize=(300*6, 300, "px"))
+                    for im_i, disp_im in enumerate(preview_ims):
+                        axes[im_i*2].imshow(get_im(disp_im.squeeze(0).float()))
+                        axes[im_i*2].set_axis_off()
+                        axes[im_i*2+1].imshow(get_im(model(disp_im)[0].to(device, torch.float32)))
+                        axes[im_i*2+1].set_axis_off()
+                    writer.add_figure("PartialResult", fig, int(batch / 64))
                 
             if batch * batch_size > stop:
                 break
@@ -233,14 +232,14 @@ class DeviationCorrectedLoss(pytorch_msssim.SSIM):
 
 
     def forward(self, X: Tensor, Y: Tensor) -> Tensor:
-        X_deviation = X.std(3)
-        X_mean, b = X.median(dim=3)
-        Y_deviation = Y.std(3)
-        Y_mean, c = Y.median(dim=3)
-        delta_mean = ((Y_mean - X_mean) ** 2) * 4
+        X_deviation = X.var(3)
+        X_mean= X.mean(dim=3)
+        Y_deviation = Y.var(3)
+        Y_mean = Y.mean(dim=3)
+        delta_mean = ((Y_mean - X_mean) ** 2) * 2
         #print(delta_mean.mean(), (((Y_mean - X_mean) * 5) ** 2).mean())
         delta_deviation = ((Y_deviation - X_deviation) * 10) ** 2
-        return 0.25 * (((1 - super(DeviationCorrectedLoss, self).forward(X.float(), Y.float())) ) + (self.mse_loss(X,Y) * 2) + delta_deviation.mean() + delta_mean.mean())
+        return 0.25 * ((1 - super(DeviationCorrectedLoss, self).forward(X.float(), Y.float())) * 2 + (self.mse_loss(X,Y) * 2) + delta_deviation.mean() + delta_mean.mean())
 
 if __name__ == '__main__':
     CURR_FIGURE = None
@@ -252,8 +251,8 @@ if __name__ == '__main__':
     board_writer = SummaryWriter("./runs/")
 
     # set the glob expression for the input tif tiles
-    tile_folders = ["/run/media/skye/backup31/dat/switzerland_tiles/18/**/*.tif",
-                    "/run/media/skye/16769757193425BC/data/swit_tiles1/18/**/*.tif"]
+    tile_folders = ["/home/skye/data/data/swit_tiles1/18/**/*.tif",
+                    "/home/skye/data/data/switzerland_tiles/18/**/*.tif"]
     zoom_level = "**"
     data_files = []
     for glob_expr in tile_folders:
@@ -265,20 +264,21 @@ if __name__ == '__main__':
     if not len(data_files):
         print("Error: No tiles!")
         exit(2)
+    random.shuffle(data_files)
     print(f"{len(data_files)} tiles ready")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.set_default_device(device)
 
     torch.cuda.empty_cache()
-    model = EncNet().to(device)
+    #model = EncNet().to(device)
 
     # uncomment and adjust path to load checkpointed model
-    #model = torch.load("models/height19_ep0.pt2", weights_only=False).to(device)
+    model = torch.load("models/height20_ep2.pt2", weights_only=False).to(device)
 
 
     loss_fn = DeviationCorrectedLoss(data_range=1, channel=1)
     current_learning_rate = 1e-3
-    batch_size = 128 # powers of two are generally useful, for reference: 64 batch_size * 10 num_workers fits easily in 8GB VRAM
+    batch_size = 256 # powers of two are generally useful, for reference: 64 batch_size * 10 num_workers fits easily in 8GB VRAM
     loss_hist = []
 
     # whether to create 16*6 mosaics every 16 batches (same images, usable as animation)
@@ -290,8 +290,8 @@ if __name__ == '__main__':
         batch_size=batch_size,  # first dimension of matrices sent,
         shuffle=True,  # randomize order
         generator=torch.Generator(device),  # load to GPU
-        num_workers=12, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
-        prefetch_factor=12,  # increase like num_workers, same reasons
+        num_workers=6, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
+        prefetch_factor=1,  # increase like num_workers, same reasons
         pin_memory=False,  # would not work with parallelisation...
         persistent_workers=True,
         drop_last=True
@@ -339,11 +339,11 @@ if __name__ == '__main__':
             board_writer.flush()
         # save full model (encode+decode, need class definition to load, but weights are saved)
         # should be 24.0MiB
-        torch.save(model, f"models/height19_ep{i}.pt2")
+        torch.save(model, f"models/height20_ep{i}.pt2")
 
         try:
             export = torch.export.export(model, (load_tile(fname, device), ))
-            torch.export.save(export, f"models/height19_ep{i}_export.pt2")
+            torch.export.save(export, f"models/height20_ep{i}_export.pt2")
         except Exception as e:
             print("Error exporting: ", e)
 
