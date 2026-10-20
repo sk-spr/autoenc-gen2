@@ -75,21 +75,21 @@ class HeightTileDataset(torch.utils.data.Dataset):
 
 
 image_size = 256 # image side length
-latent_dims = 1024 # ~= number of float32 values to compress into
-deep_n = 39*39 # width of hidden deep layers
+latent_dims = 2048 # ~= number of float32 values to compress into
+deep_n = 62*62 # width of hidden deep layers
 
 class EncNet(nn.Module):
     def __init__(self):
         super().__init__()
         # encoder: image -> latent_dims * 4 bytes
         self.encoder = nn.Sequential(
-            nn.Conv2d(1, 8, 11, stride=3, padding=0),
+            nn.Conv2d(1, 8, 11, stride=2, padding=4),
             nn.LeakyReLU(),
             nn.BatchNorm2d(8),
-            nn.Conv2d(8, 4, 7, stride=2, padding=1),
+            nn.Conv2d(8, 4, 7, stride=2, padding=4, dilation=2),
             nn.LeakyReLU(),
             nn.BatchNorm2d(4),
-            nn.Conv2d(4,1, 3, stride=1, padding=1),
+            nn.Conv2d(4,1,5,stride=1, padding=2),
             nn.LeakyReLU(),
             nn.BatchNorm2d(1),
             nn.Flatten(),
@@ -104,8 +104,10 @@ class EncNet(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
-            nn.Unflatten(1, (1,39,39)),
-            nn.ConvTranspose2d(1,8,13),
+            nn.Unflatten(1, (1,62,62)),
+            nn.ConvTranspose2d(1,4,13),
+            nn.LeakyReLU(),
+            nn.ConvTranspose2d(4,8,11, dilation=2),
             nn.LeakyReLU(),
             nn.Upsample((266,266), mode="bicubic"),
             nn.Conv2d(8,4,11, padding=2),
@@ -273,16 +275,16 @@ if __name__ == '__main__':
     #model = EncNet().to(device)
 
     # uncomment and adjust path to load checkpointed model
-    model = torch.load("models/height20_ep2.pt2", weights_only=False).to(device)
+    model = torch.load("models/height21_ep0.pt2", weights_only=False).to(device)
 
 
     loss_fn = DeviationCorrectedLoss(data_range=1, channel=1)
     current_learning_rate = 1e-3
-    batch_size = 256 # powers of two are generally useful, for reference: 64 batch_size * 10 num_workers fits easily in 8GB VRAM
+    batch_size = 128 # powers of two are generally useful, for reference: 64 batch_size * 10 num_workers fits easily in 8GB VRAM
     loss_hist = []
 
     # whether to create 16*6 mosaics every 16 batches (same images, usable as animation)
-    make_animation_frames = False
+    make_animation_frames = True
 
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True, weight_decay=1e-5)
     data_loader = torch.utils.data.DataLoader(
@@ -290,7 +292,7 @@ if __name__ == '__main__':
         batch_size=batch_size,  # first dimension of matrices sent,
         shuffle=True,  # randomize order
         generator=torch.Generator(device),  # load to GPU
-        num_workers=6, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
+        num_workers=8, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
         prefetch_factor=1,  # increase like num_workers, same reasons
         pin_memory=False,  # would not work with parallelisation...
         persistent_workers=True,
@@ -339,11 +341,11 @@ if __name__ == '__main__':
             board_writer.flush()
         # save full model (encode+decode, need class definition to load, but weights are saved)
         # should be 24.0MiB
-        torch.save(model, f"models/height20_ep{i}.pt2")
+        torch.save(model, f"models/height21_ep{i}.pt2")
 
         try:
             export = torch.export.export(model, (load_tile(fname, device), ))
-            torch.export.save(export, f"models/height20_ep{i}_export.pt2")
+            torch.export.save(export, f"models/height21_ep{i}_export.pt2")
         except Exception as e:
             print("Error exporting: ", e)
 
