@@ -58,7 +58,6 @@ def imshow(tensorA, tensorB, title=None):
     #fig.show()
     CURR_FIGURE = fig
 
-
 class HeightTileDataset(torch.utils.data.Dataset):
     def __init__(self, file_list, device, transform=None):
         self.images = len(file_list)
@@ -75,44 +74,50 @@ class HeightTileDataset(torch.utils.data.Dataset):
 
 
 image_size = 256 # image side length
-latent_dims = 2048 # ~= number of float32 values to compress into
-deep_n = 62*62 # width of hidden deep layers
+latent_dims = 8 * 12 * 12 # ~= number of float32 values to compress into
+deep_n = 2048 # width of hidden deep layers
 
 class EncNet(nn.Module):
     def __init__(self):
         super().__init__()
         # encoder: image -> latent_dims * 4 bytes
         self.encoder = nn.Sequential(
-            nn.Conv2d(1, 8, 11, stride=2, padding=4),
+            nn.Conv2d(1, 16, 11, stride=1, padding=0), # (N,16,248,248)
             nn.LeakyReLU(),
-            nn.BatchNorm2d(8),
-            nn.Conv2d(8, 4, 7, stride=2, padding=4, dilation=2),
+            #nn.BatchNorm2d(16),
+            nn.MaxPool2d(2,stride=2,padding=0),# (N, 16, 124, 124)
+            nn.Conv2d(16, 8, 7, stride=2, padding=0, dilation=2), # (N,8,60,60)
             nn.LeakyReLU(),
-            nn.BatchNorm2d(4),
-            nn.Conv2d(4,1,5,stride=1, padding=2),
+            #nn.BatchNorm2d(8),
+            nn.MaxPool2d(2,stride=2,padding=1), # (N,8,31,31)
+            nn.Conv2d(8,8,6,stride=2, padding=0), # (N,8,12,12)
             nn.LeakyReLU(),
-            nn.BatchNorm2d(1),
+            #nn.BatchNorm2d(8),
             nn.Flatten(),
-            nn.Linear(deep_n, deep_n),
-            nn.LeakyReLU(),
-            nn.Linear(deep_n, latent_dims),
-            nn.LeakyReLU(),
+            #nn.Linear(deep_n, deep_n),
+            #nn.LeakyReLU(),
+            #nn.Linear(8*12*12, latent_dims),
+            nn.Sigmoid(),
         )
         # decoder is pretty directly mirror, but trained independently
         self.decoder = nn.Sequential(
-            nn.Linear(latent_dims, deep_n),
+            #nn.Linear(latent_dims, 8*12*12),
+            #nn.LeakyReLU(),
+            nn.Unflatten(1, (8,12,12)),
+            nn.ConvTranspose2d(8,16,17, stride=2,padding=0), #(N, 16, 39, 39)
+            nn.Conv2d(16,16,5,stride=1,padding=2), #(N,16,39,39)
             nn.LeakyReLU(),
-            nn.Linear(deep_n, deep_n),
+            nn.ConvTranspose2d(16,16,14, stride=3,padding=0), # (N,16,128,128)
+            nn.Conv2d(16,16,7, stride=1, padding=3), # (N,16,128,128)
             nn.LeakyReLU(),
-            nn.Unflatten(1, (1,62,62)),
-            nn.ConvTranspose2d(1,4,13),
+            nn.ConvTranspose2d(16, 8, 12,stride=2,padding=5), # (N,8,256,256
+            nn.Conv2d(8,4,7,stride=1,padding='same'),
             nn.LeakyReLU(),
-            nn.ConvTranspose2d(4,8,11, dilation=2),
-            nn.LeakyReLU(),
-            nn.Upsample((266,266), mode="bicubic"),
-            nn.Conv2d(8,4,11, padding=2),
-            nn.LeakyReLU(),
-            nn.Conv2d(4,1,5,padding=0),
+            nn.Conv2d(4,1,3,stride=1,padding='same'),
+            #nn.Upsample((266,266), mode="bicubic"),
+            #nn.Conv2d(8,4,11, padding=2),
+            #nn.LeakyReLU(),
+            #nn.Conv2d(4,1,5,padding=0),
             nn.Sigmoid()
         )
 
@@ -217,6 +222,25 @@ def test(dataloader: DataLoader, mod: nn.Module, loss: nn.Module):
     test_loss /= num_batches
     #print(f"Avg loss: {test_loss:>8f}")
     return test_loss
+class SoftMarginLoss(torch.nn.MSELoss):
+    def __init__(self, margin_full_px: float, margin_gradient_px: float):
+        self.margin_mask = torch.zeros((1,image_size, image_size))
+        content_amount = 0.0
+        for y in range(image_size):
+            for x in range(image_size):
+                margin_dist = min([x,y,image_size-x, image_size-y])
+                if margin_dist <= margin_full_px:
+                    self.margin_mask[0,y,x] = 1.0
+                    content_amount += 1.0
+                elif margin_full_px < margin_dist < (margin_full_px + margin_gradient_px):
+                    margin_amount = 1 - ((margin_dist - margin_full_px) / margin_gradient_px)
+                    self.margin_mask[0,y,x] = margin_amount
+                    content_amount += margin_amount
+        self.reduction_ratio = content_amount / (image_size ** 2)
+        super().__init__()
+
+    def forward(self, input: Tensor, target: Tensor) -> Tensor:
+        return super().forward(input * self.margin_mask, target * self.margin_mask) * (1 / self.reduction_ratio)
 
 class DeviationCorrectedLoss(pytorch_msssim.SSIM):
     def __init__(
@@ -231,6 +255,7 @@ class DeviationCorrectedLoss(pytorch_msssim.SSIM):
     ):
         super(DeviationCorrectedLoss, self).__init__(data_range, True, win_size, win_sigma, channel, spatial_dims, K)
         self.mse_loss = nn.MSELoss()
+        self.margin_loss = SoftMarginLoss(16, 32)
 
 
     def forward(self, X: Tensor, Y: Tensor) -> Tensor:
@@ -241,7 +266,7 @@ class DeviationCorrectedLoss(pytorch_msssim.SSIM):
         delta_mean = ((Y_mean - X_mean) ** 2) * 2
         #print(delta_mean.mean(), (((Y_mean - X_mean) * 5) ** 2).mean())
         delta_deviation = ((Y_deviation - X_deviation) * 10) ** 2
-        return 0.25 * ((1 - super(DeviationCorrectedLoss, self).forward(X.float(), Y.float())) * 2 + (self.mse_loss(X,Y) * 2) + delta_deviation.mean() + delta_mean.mean())
+        return 0.25 * ((1 - super(DeviationCorrectedLoss, self).forward(X.float(), Y.float())) * 2 + self.mse_loss(X,Y) + (self.margin_loss(X,Y) * 4) + delta_deviation.mean() + delta_mean.mean())
 
 if __name__ == '__main__':
     CURR_FIGURE = None
@@ -272,10 +297,10 @@ if __name__ == '__main__':
     torch.set_default_device(device)
 
     torch.cuda.empty_cache()
-    #model = EncNet().to(device)
+    model = EncNet().to(device)
 
     # uncomment and adjust path to load checkpointed model
-    model = torch.load("models/height21_ep0.pt2", weights_only=False).to(device)
+    #model = torch.load("models/height21_ep3.pt2", weights_only=False).to(device)
 
 
     loss_fn = DeviationCorrectedLoss(data_range=1, channel=1)
@@ -284,7 +309,7 @@ if __name__ == '__main__':
     loss_hist = []
 
     # whether to create 16*6 mosaics every 16 batches (same images, usable as animation)
-    make_animation_frames = True
+    make_animation_frames = False
 
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True, weight_decay=1e-5)
     data_loader = torch.utils.data.DataLoader(
@@ -292,8 +317,8 @@ if __name__ == '__main__':
         batch_size=batch_size,  # first dimension of matrices sent,
         shuffle=True,  # randomize order
         generator=torch.Generator(device),  # load to GPU
-        num_workers=8, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
-        prefetch_factor=1,  # increase like num_workers, same reasons
+        num_workers=6, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
+        prefetch_factor=2,  # increase like num_workers, same reasons
         pin_memory=False,  # would not work with parallelisation...
         persistent_workers=True,
         drop_last=True
@@ -340,19 +365,14 @@ if __name__ == '__main__':
             CURR_FIGURE = fig
             board_writer.flush()
         # save full model (encode+decode, need class definition to load, but weights are saved)
-        # should be 24.0MiB
-        torch.save(model, f"models/height21_ep{i}.pt2")
+        torch.save(model, f"models/height24_ep{i}.pt2")
 
         try:
             export = torch.export.export(model, (load_tile(fname, device), ))
-            torch.export.save(export, f"models/height21_ep{i}_export.pt2")
+            torch.export.save(export, f"models/height24_ep{i}_export.pt2")
         except Exception as e:
             print("Error exporting: ", e)
 
         fig, ax = plt.subplots(1,1)
         ax.plot(loss_hist)
         #fig.show()
-
-        if i % 4 == 0:
-            current_learning_rate *= 1.3
-            optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
