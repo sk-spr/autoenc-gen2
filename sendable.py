@@ -4,8 +4,12 @@ import os
 import random
 import time
 from asyncio import Task
+from typing import Optional, List, Union, Tuple
 
+import pytorch_msssim
 import tensorboard
+from pytorch_msssim import ms_ssim
+from torch.amp import custom_fwd
 from torch.multiprocessing import freeze_support
 import numpy as np
 
@@ -26,11 +30,11 @@ from torch.utils.tensorboard import SummaryWriter
 CURR_FIGURE=None
 
 def load_tile(fname, device):
-    im = (np.array(Image.open(fname).get_flattened_data()).reshape(1, image_size, image_size)).astype(np.float32)
-    min_val = np.amin(im).astype(np.float32)
-    max_val = np.amax(im).astype(np.float32)
+    im = (np.array(Image.open(fname).get_flattened_data()).reshape(1, image_size, image_size))
+    min_val = np.amin(im)
+    max_val = np.amax(im)
     #print(max_val - min_val)
-    return torch.from_numpy((im - min_val) / (max(max_val - min_val, 1))).unsqueeze(0).to(device, torch.float)
+    return torch.from_numpy((im - min_val) / (max(max_val - min_val, 1))).unsqueeze(0).to(device, torch.float32)
 
 unloader = transforms.ToPILImage()  # reconvert into PIL image
 
@@ -51,9 +55,8 @@ def imshow(tensorA, tensorB, title=None):
 
     if title is not None:
         ax[0].title(title)
-    fig.show()
+    #fig.show()
     CURR_FIGURE = fig
-
 
 class HeightTileDataset(torch.utils.data.Dataset):
     def __init__(self, file_list, device, transform=None):
@@ -71,78 +74,115 @@ class HeightTileDataset(torch.utils.data.Dataset):
 
 
 image_size = 256 # image side length
-latent_dims = 1024 # ~= number of float32 values to compress into
-deep_n = 1024 # width of hidden deep layers
+latent_dims = 8 * 12 * 12 # ~= number of float32 values to compress into
+deep_n = 2048 # width of hidden deep layers
 
-ksize = 8 # main convolution kernel size
-stride = 2 # main convolution kernel stride
-padding = 3 # main convolution kernel application padding
-hout = (image_size + 2 * padding - (ksize - 1))/stride
 class EncNet(nn.Module):
     def __init__(self):
         super().__init__()
         # encoder: image -> latent_dims * 4 bytes
         self.encoder = nn.Sequential(
-            nn.Conv2d(1, 1, ksize, stride=stride, padding=padding), # output is shape (4,128,128)
-            nn.Sigmoid(),
-            nn.Flatten(),
-            nn.Linear(128 * 128, deep_n),
-            nn.Sigmoid(),
-            nn.Linear(deep_n, deep_n),
-            nn.Sigmoid(),
-            nn.Linear(deep_n, latent_dims),
+            nn.Conv2d(1, 16, 11, stride=1, padding=0), # (N,16,248,248)
+            nn.LeakyReLU(),
+            #nn.BatchNorm2d(16),
+            nn.MaxPool2d(2,stride=2,padding=0),# (N, 16, 124, 124)
+            nn.Conv2d(16, 16, 7, stride=2, padding=0, dilation=1), # (N,8,60,60)
+            nn.LeakyReLU(),
+            #nn.BatchNorm2d(8),
+            nn.Conv2d(16,16,7,stride=2,padding=0,dilation=1),
+            nn.LeakyReLU(),
+            nn.Conv2d(16,8,5,stride=2, padding=0),
+            nn.LeakyReLU(),
+            nn.Conv2d(8, 2, 3, stride=1, padding="same"),
             nn.Sigmoid()
         )
         # decoder is pretty directly mirror, but trained independently
         self.decoder = nn.Sequential(
-            nn.Linear(latent_dims, deep_n),
-            nn.Sigmoid(),
-            nn.Linear(deep_n, deep_n),
-            nn.Sigmoid(),
-            nn.Linear(deep_n, 128 * 128),
-            nn.Sigmoid(),
-            nn.Unflatten(1, torch.Size((1, 128, 128))),
-            nn.ConvTranspose2d(1, 1, ksize, stride=stride, padding=padding),
+            #nn.Unflatten(1, (4,12,12)),
+            nn.ConvTranspose2d(2,8,9, stride=3,padding=0), #(N, 16, 42, 42)
+            nn.Conv2d(8,16,7,stride=1,padding=0), #(N,16,32,32)
+            nn.LeakyReLU(),
+            nn.ConvTranspose2d(16,16,11, stride=3,padding=0,dilation=2), # (N,16,151,151)
+            nn.Conv2d(16,16,7, stride=1, padding=0), # (N,16,148,148)
+            nn.LeakyReLU(),
+            nn.ConvTranspose2d(16, 8, 7,stride=2,padding=0,dilation=3), # (N,8,256,256
+            nn.Conv2d(8,1,4,stride=1,padding=1),
             nn.Sigmoid()
         )
+
     def forward(self, x: Tensor):
         #print(x.shape)
         encoded = self.encoder(x)
         #print(encoded.shape)
         decoded = self.decoder(encoded)
+
         #print(decoded.shape)
         return decoded
+def save_collage(originals, outputs, n_step, vanity_folder):
+    fig, axes = plt.subplots(9,12, figsize=(1200, 900, "px"), layout="tight")
+    for row in range(9):
+        for col in range(6):
+            ims = [originals[row * 6 + col], outputs[row * 6 + col]]
+            for im_n in range(2):
+                ax = axes[row, col * 2 + im_n]
 
-def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Module, opt: torch.optim.Optimizer, writer: SummaryWriter, starti, stop=99999999, write_tensorboard=True, batch_size=1024):
+                ax.imshow(ims[im_n], extent=(0,256,0,256))
+                ax.set_axis_off()
+    fig.savefig(f"{vanity_folder}/step{n_step:08d}.png")
+
+    plt.close(fig)
+
+def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Module, opt: torch.optim.Optimizer, writer: SummaryWriter, starti, stop=99999999, write_tensorboard=True, batch_size=1024, subcycles=2, scaler=torch.amp.GradScaler("cuda"), epoch_num = 0, animation = False):
     loss_nums = []
-    subcycles = 2
-    for i in range(subcycles): # increase number of per-epoch cycles if training is over too quickly before reloading to test
+    for subcycle_i in range(subcycles): # increase number of per-epoch cycles if training is over too quickly before reloading to test
         mod.train()
+        batch_losses = []
+        test_ims = []
         for batch, x in enumerate(dataloader):
             input_batch = x
+            if batch == 0:
+                test_ims = x[:54,:,:,:]
             input_batch = torch.squeeze(input_batch, 1)
             rep_losses = []
-            for rep in range(10):
+            train_tick = time.time_ns()
+            for rep in range(1):
                 prediction = mod(input_batch)
                 #print(input_batch.shape, "vs", prediction.shape)
                 #print(input_batch.shape, prediction.shape)
-                assert prediction.shape == input_batch.shape
-                calculated_loss = loss(prediction, input_batch)
+                assert prediction.shape == input_batch.shape, f"Prediction was shape {prediction.shape}, should be {input_batch.shape}"
+                loss1 = loss(prediction, input_batch)
+                calculated_loss = loss1.to(torch.float32).item()
+                scaler.scale(loss1).backward()
+                scaler.step(opt)
+                scaler.update()
+                opt.zero_grad()
 
-                calculated_loss.backward()
-                opt.step()
-                loss_nums.append(calculated_loss.item())
-                rep_losses.append(calculated_loss.item())
-
+                loss_nums.append(calculated_loss)
+                rep_losses.append(calculated_loss)
+                batch_losses.append(calculated_loss)
+                batch_losses = batch_losses[-min(len(batch_losses), 32):]
 
                 if write_tensorboard:
-                    writer.add_scalar("Loss/TrainFine", calculated_loss.item(), (starti + i * (len(data_files) / batch_size) + batch) * 10 + rep)
+                    writer.add_scalar("Loss/TrainFine", calculated_loss, (starti + subcycle_i * (len(data_files) / batch_size) + batch) * 1 + rep)
                     writer.flush()
+            train_time_ms = (time.time_ns() - train_tick) / 1000000
+            if batch % 32 == 0:
+                print(f"[{int(batch / (len(data_files) / batch_size) * 100):>2d}%]Batch {batch:0>5} ({batch * batch_size} images procd) - loss {float(np.mean(np.array(batch_losses)))} in {train_time_ms / batch_size} ms per image")
+            if batch % 16 == 0 and animation:
+                im_batch = model(test_ims.squeeze(1).cuda())
+                save_collage([get_im(test_ims[im].squeeze(0).to(torch.float32)) for im in range(len(test_ims))], [get_im(im_batch[im].squeeze(0).to(torch.float32)) for im in range(len(test_ims))], batch // 4, f"vanity{epoch_num:02}")
+            if batch % 64 == 0:
+                if write_tensorboard:
+                    preview_ims = [load_tile(data_files[random.randrange(0, len(data_files))], device) for im_i in
+                                   range(3)]
+                    fig, axes = plt.subplots(1,6, layout="tight", figsize=(300*6, 300, "px"))
+                    for im_i, disp_im in enumerate(preview_ims):
+                        axes[im_i*2].imshow(get_im(disp_im.squeeze(0).float()))
+                        axes[im_i*2].set_axis_off()
+                        axes[im_i*2+1].imshow(get_im(model(disp_im)[0].to(device, torch.float32)))
+                        axes[im_i*2+1].set_axis_off()
+                    writer.add_figure("PartialResult", fig, int(batch / 64))
                 
-            print(f"[{int(batch / (len(data_files) / batch_size) * 100):>2d}%]Batch {batch:0>5} ({batch * batch_size} images procd) - loss {float(np.mean(np.array(rep_losses)))}")
-            if batch % math.floor(50000/batch_size) == 0:
-                disp_im = load_tile(data_files[random.randrange(0, len(data_files))], device)
-                imshow(disp_im.squeeze(0), model(disp_im.squeeze(0)))
             if batch * batch_size > stop:
                 break
     print("Training cycle done")
@@ -171,23 +211,68 @@ def test(dataloader: DataLoader, mod: nn.Module, loss: nn.Module):
     test_loss /= num_batches
     #print(f"Avg loss: {test_loss:>8f}")
     return test_loss
+class SoftMarginLoss(torch.nn.MSELoss):
+    def __init__(self, margin_full_px: float, margin_gradient_px: float):
+        self.margin_mask = torch.zeros((1,image_size, image_size))
+        content_amount = 0.0
+        for y in range(image_size):
+            for x in range(image_size):
+                margin_dist = min([x,y,image_size-x, image_size-y])
+                if margin_dist <= margin_full_px:
+                    self.margin_mask[0,y,x] = 1.0
+                    content_amount += 1.0
+                elif margin_full_px < margin_dist < (margin_full_px + margin_gradient_px):
+                    margin_amount = 1 - ((margin_dist - margin_full_px) / margin_gradient_px)
+                    self.margin_mask[0,y,x] = margin_amount
+                    content_amount += margin_amount
+        self.reduction_ratio = content_amount / (image_size ** 2)
+        super().__init__()
+
+    def forward(self, input: Tensor, target: Tensor) -> Tensor:
+        return super().forward(input * self.margin_mask, target * self.margin_mask) * (1 / self.reduction_ratio)
+
+class DeviationCorrectedLoss(pytorch_msssim.SSIM):
+    def __init__(
+        self,
+        data_range: float = 1.0,
+        win_size: int = 11,
+        win_sigma: float = 1.5,
+        channel: int = 3,
+        spatial_dims: int = 2,
+        weights: Optional[List[float]] = None,
+        K: Union[Tuple[float, float], List[float]] = (0.01, 0.03),
+    ):
+        super().__init__(data_range, True, win_size, win_sigma, channel, spatial_dims, K)
+        self.mse_loss = nn.MSELoss()
+        self.margin_loss = SoftMarginLoss(16, 32)
+
+
+    def forward(self, X: Tensor, Y: Tensor) -> Tensor:
+        X_deviation = X.var(3)
+        X_mean= X.mean(dim=3)
+        Y_deviation = Y.var(3)
+        Y_mean = Y.mean(dim=3)
+        delta_mean = ((Y_mean - X_mean) ** 2) * 2
+        #print(delta_mean.mean(), (((Y_mean - X_mean) * 5) ** 2).mean())
+        delta_deviation = ((Y_deviation - X_deviation) * 10) ** 2
+        return 0.25 * ((1 - super().forward(X.float(), Y.float())) * 2 + self.mse_loss(X,Y) + (self.margin_loss(X,Y) * 4) + delta_deviation.mean() + delta_mean.mean())
 
 if __name__ == '__main__':
     CURR_FIGURE = None
     print("is_main")
     freeze_support()
+
+    scaler = torch.amp.GradScaler("cuda")
     torch.multiprocessing.set_start_method('spawn')
     board_writer = SummaryWriter("./runs/")
 
-    # possible batch sizes to test
-    batch_options = [2048, 4096, 8192]
-    # possible learning rates
-    learning_rate_candidates = [1e-6, 1e-5]
-
     # set the glob expression for the input tif tiles
-    tile_folder = "data/tiles/18/*/*.tif"
+    tile_folders = ["/home/skye/data/data/swit_tiles1/18/**/*.tif",
+                    "/home/skye/data/data/switzerland_tiles/18/**/*.tif"]
     zoom_level = "**"
-    data_files = glob.glob(tile_folder)
+    data_files = []
+    for glob_expr in tile_folders:
+        data_files += glob.glob(glob_expr)
     print(f"{len(data_files)} raw files")
 
     # exclude files under 1.2k (empty images from outside the mapped area)
@@ -195,6 +280,7 @@ if __name__ == '__main__':
     if not len(data_files):
         print("Error: No tiles!")
         exit(2)
+    random.shuffle(data_files)
     print(f"{len(data_files)} tiles ready")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.set_default_device(device)
@@ -203,137 +289,62 @@ if __name__ == '__main__':
     model = EncNet().to(device)
 
     # uncomment and adjust path to load checkpointed model
-    #model = torch.load("./models/height5_ep1.pt2", weights_only=False).to(device)
+    #model = torch.load("models/height25_ep3.pt2", weights_only=False).to(device)
 
-    orig_model = model.cpu()
 
-    loss_fn = nn.MSELoss()
-    current_learning_rate = 1e-4 # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
-    optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True) # lr?
-
-    print("Initializing dataloader")
-    batch_size = 4096 # tweak batch_size to get high standby vram utilisation
+    loss_fn = DeviationCorrectedLoss(data_range=1, channel=1)
+    current_learning_rate = 1e-3
+    batch_size = 128 # powers of two are generally useful, for reference: 64 batch_size * 10 num_workers fits easily in 8GB VRAM
     loss_hist = []
-    data_loader = torch.utils.data.DataLoader(
-        HeightTileDataset(data_files, device),
-        batch_size=batch_size, # first dimension of matrices sent,
-        shuffle=True, # randomize order
-        generator=torch.Generator(device), # load to GPU
-        pin_memory=False, # would not work with parallelisation...
-        persistent_workers=False) # make workers resident
-    print("finding appropriate metaparameters")
-    metaparam_data = []
-    autodetect_metaparameters = False
-    autodetect_n_img = 1024*64
-    if autodetect_metaparameters:
-        losses = {}
 
-        for batch_size_candidate in batch_options:
-            print(f"Trying batches with n={batch_size_candidate} ...")
+    # whether to create 16*6 mosaics every 16 batches (same images, usable as animation)
+    make_animation_frames = False
 
-
-            data_loader = torch.utils.data.DataLoader(
-                HeightTileDataset(data_files[:autodetect_n_img], device),
-                batch_size=batch_size_candidate,  # first dimension of matrices sent,
-                shuffle=True,  # randomize order
-                generator=torch.Generator(device),  # load to GPU
-                num_workers=12,
-                # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
-                prefetch_factor=12,  # increase like num_workers, same reasons
-                pin_memory=False,  # would not work with parallelisation...
-                persistent_workers=True)  # make workers resident
-            for learning_rate_candidate in learning_rate_candidates:
-                print(f"learning rate {learning_rate_candidate}")
-                model = EncNet().to(device)
-                model.zero_grad()
-
-                torch.cuda.empty_cache()
-
-                current_learning_rate = learning_rate_candidate  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
-                optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
-                before_train = time.time()
-                train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, 0, autodetect_n_img, False, batch_size_candidate)
-                train_duration = time.time() - before_train
-
-                curve_fit_x = np.linspace(0, len(train_losses), len(train_losses))
-                curve_fit_y = np.array(train_losses)
-                fitted_poly = np.polyfit(curve_fit_x, curve_fit_y, 3)
-                curve_points = np.poly1d(fitted_poly)(curve_fit_x)
-                delta_real_fit = np.square(curve_points - curve_fit_y)
-                f, a = plt.subplots(2,1)
-                a[0].plot(curve_fit_y, color="red")
-                a[0].plot(curve_points, color="green")
-                a[1].plot(delta_real_fit)
-                f.show()
-                print(float(np.mean(delta_real_fit)))
-                mean_start = float(np.mean(np.array(train_losses[:5])))
-                mean_end = float(np.mean(np.array(train_losses[-5:])))
-                metaparam_data.append((learning_rate_candidate, batch_size_candidate,mean_end - mean_start, train_duration, float(np.mean(delta_real_fit))))
-                print(metaparam_data[-1])
-                losses[f"lr_{learning_rate_candidate}_bs_{batch_size_candidate}"] = train_losses
-                print(f"LR {learning_rate_candidate}, Batch Size {batch_size_candidate}: Improved by {mean_end - mean_start} with variance {float(np.mean(delta_real_fit))} in {train_duration} seconds")
-                data = train_losses
-                for datum_i in range(len(data)):
-                    board_writer.add_scalar(f"Loss/Meta/lr_{learning_rate_candidate}_bs_{batch_size_candidate}", data[datum_i], datum_i)
-
-                    board_writer.flush()
-        metaparam_data.sort(key=lambda x: x[2])
-
-        print([f"LR {r[0]}, Batch Size {r[1]}: Improved by {r[2]} with variance {r[4]} in {r[3]} seconds\n" for r in metaparam_data])
-        improvement_scaled = [(l[0], l[1], (l[2] / l[3]) * 100 / l[4]) for l in metaparam_data]
-        for batch_size_candidate in batch_options:
-            print(f"Results for batch size {batch_size_candidate}")
-            for learning_rate_candidate in learning_rate_candidates:
-                datum = [row for row in improvement_scaled if row[0] == learning_rate_candidate and row[1] == batch_size_candidate][0]
-                print(f"[{batch_size_candidate}-batches at LR {learning_rate_candidate}]: score={datum[2]}")
-        improvement_scaled.sort(key=lambda x: x[2], reverse=False)
-
-        print(improvement_scaled)
-        batch_size = improvement_scaled[0][1]
-        current_learning_rate = improvement_scaled[0][0]  # 1e-5 on fresh model, 1e-4 to 1e-3 for starting trained
-    else:
-        current_learning_rate = 1e-5
-        batch_size = 8192
-        model = orig_model.cuda(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
+    optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True, weight_decay=1e-5)
     data_loader = torch.utils.data.DataLoader(
         HeightTileDataset(data_files, device),
         batch_size=batch_size,  # first dimension of matrices sent,
         shuffle=True,  # randomize order
         generator=torch.Generator(device),  # load to GPU
-        num_workers=14, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
-        prefetch_factor=1,  # increase like num_workers, same reasons
+        num_workers=6, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
+        prefetch_factor=2,  # increase like num_workers, same reasons
         pin_memory=False,  # would not work with parallelisation...
-        persistent_workers=True)  # make workers resident
+        persistent_workers=True,
+        drop_last=True
+        )  # make workers resident
     for i in range(100):
         print(f"------------------------\nEpoch {i}")
         # each epoch contains train_iter_per_epoch cycles, each train call runs the dataset 4 times
-
+        if not os.path.exists(f"vanity{i:02}/"):
+            os.mkdir(f"vanity{i:02}")
         # display current inference result
         fig, axes = plt.subplots(1, 2)
 
-        fname = glob.glob(f"{tile_folder}")[random.randrange(0, len(data_files))]
+        fname = data_files[random.randrange(0, len(data_files))]
         imshow(load_tile(fname, device)[0], model(load_tile(fname, device))[0])
         board_writer.add_figure("CurrentResult", figure=fig, global_step=i * 3 )
 
         # run training/test loop n times
-        train_iter_per_epoch = 1
+        train_iter_per_epoch = 1 if i < 2 else 1
         for j in range(train_iter_per_epoch):
             print(f"-------------\n[[{int(j/train_iter_per_epoch * 100.0):>2d}%]]\n-----------")
+
+            num_train_subcycles = 1 if i < 1 else 1
             tick = time.time()
-            train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, (i * train_iter_per_epoch + j) * 1 * (len(data_files) / batch_size), len(data_files), True, batch_size)
-            time_full_train = (time.time() - tick) / (len(data_files) * 1) # FIXME pull this scalar from the same place as train() subepoch count
+            train_losses = train(data_loader, model, loss_fn, optimizer, board_writer, (i * train_iter_per_epoch + j) * 1 * (len(data_files) / batch_size), len(data_files), True, batch_size, num_train_subcycles,scaler=scaler, epoch_num=i, animation=make_animation_frames)
+            time_full_train = (time.time() - tick) / (len(data_files) * num_train_subcycles) # FIXME pull this scalar from the same place as train() subepoch count
             print(f"average {(time_full_train * 1000):2<5f}ms training time per image (approx)")
             loss_hist = loss_hist + train_losses
             test_losses = test(data_loader, model, loss_fn)
             board_writer.add_scalar("Loss/test", test_losses, i * train_iter_per_epoch + j + 1 )
             board_writer.flush()
+
             loss_hist.append(test_losses)
-            
+
             board_writer.add_scalar("LearningRate", current_learning_rate, global_step=i * 3 + j + 1)
             for k in range(10):
                 fig, axes = plt.subplots(1, 2)
-                fname = glob.glob(f"{tile_folder}")[random.randrange(0,len(data_files))]
+                fname = data_files[random.randrange(0,len(data_files))]
                 if CURR_FIGURE:
                     try: plt.close(CURR_FIGURE)
                     except: print("e")
@@ -343,12 +354,14 @@ if __name__ == '__main__':
             CURR_FIGURE = fig
             board_writer.flush()
         # save full model (encode+decode, need class definition to load, but weights are saved)
-        # should be 24.0MiB
-        torch.save(model, f"models/height6_ep{i}.pt2")
+        torch.save(model, f"models/height25_ep{i}.pt2")
+
+        try:
+            export = torch.export.export(model, (load_tile(fname, device), ))
+            torch.export.save(export, f"models/height25_ep{i}_export.pt2")
+        except Exception as e:
+            print("Error exporting: ", e)
+
         fig, ax = plt.subplots(1,1)
         ax.plot(loss_hist)
-        fig.show()
-
-        if i % 4 == 0:
-            current_learning_rate *= 1.3
-            optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True)  # lr?
+        #fig.show()
