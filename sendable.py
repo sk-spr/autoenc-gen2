@@ -86,38 +86,27 @@ class EncNet(nn.Module):
             nn.LeakyReLU(),
             #nn.BatchNorm2d(16),
             nn.MaxPool2d(2,stride=2,padding=0),# (N, 16, 124, 124)
-            nn.Conv2d(16, 8, 7, stride=2, padding=0, dilation=2), # (N,8,60,60)
+            nn.Conv2d(16, 16, 7, stride=2, padding=0, dilation=1), # (N,8,60,60)
             nn.LeakyReLU(),
             #nn.BatchNorm2d(8),
-            nn.MaxPool2d(2,stride=2,padding=1), # (N,8,31,31)
-            nn.Conv2d(8,8,6,stride=2, padding=0), # (N,8,12,12)
+            nn.Conv2d(16,16,7,stride=2,padding=0,dilation=1),
             nn.LeakyReLU(),
-            #nn.BatchNorm2d(8),
-            nn.Flatten(),
-            #nn.Linear(deep_n, deep_n),
-            #nn.LeakyReLU(),
-            #nn.Linear(8*12*12, latent_dims),
-            nn.Sigmoid(),
+            nn.Conv2d(16,8,5,stride=2, padding=0),
+            nn.LeakyReLU(),
+            nn.Conv2d(8, 2, 3, stride=1, padding="same"),
+            nn.Sigmoid()
         )
         # decoder is pretty directly mirror, but trained independently
         self.decoder = nn.Sequential(
-            #nn.Linear(latent_dims, 8*12*12),
-            #nn.LeakyReLU(),
-            nn.Unflatten(1, (8,12,12)),
-            nn.ConvTranspose2d(8,16,17, stride=2,padding=0), #(N, 16, 39, 39)
-            nn.Conv2d(16,16,5,stride=1,padding=2), #(N,16,39,39)
+            #nn.Unflatten(1, (4,12,12)),
+            nn.ConvTranspose2d(2,8,9, stride=3,padding=0), #(N, 16, 42, 42)
+            nn.Conv2d(8,16,7,stride=1,padding=0), #(N,16,32,32)
             nn.LeakyReLU(),
-            nn.ConvTranspose2d(16,16,14, stride=3,padding=0), # (N,16,128,128)
-            nn.Conv2d(16,16,7, stride=1, padding=3), # (N,16,128,128)
+            nn.ConvTranspose2d(16,16,11, stride=3,padding=0,dilation=2), # (N,16,151,151)
+            nn.Conv2d(16,16,7, stride=1, padding=0), # (N,16,148,148)
             nn.LeakyReLU(),
-            nn.ConvTranspose2d(16, 8, 12,stride=2,padding=5), # (N,8,256,256
-            nn.Conv2d(8,4,7,stride=1,padding='same'),
-            nn.LeakyReLU(),
-            nn.Conv2d(4,1,3,stride=1,padding='same'),
-            #nn.Upsample((266,266), mode="bicubic"),
-            #nn.Conv2d(8,4,11, padding=2),
-            #nn.LeakyReLU(),
-            #nn.Conv2d(4,1,5,padding=0),
+            nn.ConvTranspose2d(16, 8, 7,stride=2,padding=0,dilation=3), # (N,8,256,256
+            nn.Conv2d(8,1,4,stride=1,padding=1),
             nn.Sigmoid()
         )
 
@@ -253,7 +242,7 @@ class DeviationCorrectedLoss(pytorch_msssim.SSIM):
         weights: Optional[List[float]] = None,
         K: Union[Tuple[float, float], List[float]] = (0.01, 0.03),
     ):
-        super(DeviationCorrectedLoss, self).__init__(data_range, True, win_size, win_sigma, channel, spatial_dims, K)
+        super().__init__(data_range, True, win_size, win_sigma, channel, spatial_dims, K)
         self.mse_loss = nn.MSELoss()
         self.margin_loss = SoftMarginLoss(16, 32)
 
@@ -266,7 +255,7 @@ class DeviationCorrectedLoss(pytorch_msssim.SSIM):
         delta_mean = ((Y_mean - X_mean) ** 2) * 2
         #print(delta_mean.mean(), (((Y_mean - X_mean) * 5) ** 2).mean())
         delta_deviation = ((Y_deviation - X_deviation) * 10) ** 2
-        return 0.25 * ((1 - super(DeviationCorrectedLoss, self).forward(X.float(), Y.float())) * 2 + self.mse_loss(X,Y) + (self.margin_loss(X,Y) * 4) + delta_deviation.mean() + delta_mean.mean())
+        return 0.25 * ((1 - super().forward(X.float(), Y.float())) * 2 + self.mse_loss(X,Y) + (self.margin_loss(X,Y) * 4) + delta_deviation.mean() + delta_mean.mean())
 
 if __name__ == '__main__':
     CURR_FIGURE = None
@@ -300,7 +289,7 @@ if __name__ == '__main__':
     model = EncNet().to(device)
 
     # uncomment and adjust path to load checkpointed model
-    #model = torch.load("models/height21_ep3.pt2", weights_only=False).to(device)
+    #model = torch.load("models/height25_ep3.pt2", weights_only=False).to(device)
 
 
     loss_fn = DeviationCorrectedLoss(data_range=1, channel=1)
@@ -365,11 +354,11 @@ if __name__ == '__main__':
             CURR_FIGURE = fig
             board_writer.flush()
         # save full model (encode+decode, need class definition to load, but weights are saved)
-        torch.save(model, f"models/height24_ep{i}.pt2")
+        torch.save(model, f"models/height25_ep{i}.pt2")
 
         try:
             export = torch.export.export(model, (load_tile(fname, device), ))
-            torch.export.save(export, f"models/height24_ep{i}_export.pt2")
+            torch.export.save(export, f"models/height25_ep{i}_export.pt2")
         except Exception as e:
             print("Error exporting: ", e)
 
