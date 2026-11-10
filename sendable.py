@@ -100,13 +100,18 @@ class EncNet(nn.Module):
         self.decoder = nn.Sequential(
             #nn.Unflatten(1, (4,12,12)),
             nn.ConvTranspose2d(2,8,9, stride=3,padding=0), #(N, 16, 42, 42)
+            nn.LeakyReLU(),
             nn.Conv2d(8,16,7,stride=1,padding=0), #(N,16,32,32)
             nn.LeakyReLU(),
             nn.ConvTranspose2d(16,16,11, stride=3,padding=0,dilation=2), # (N,16,151,151)
+            nn.LeakyReLU(),
             nn.Conv2d(16,16,7, stride=1, padding=0), # (N,16,148,148)
             nn.LeakyReLU(),
             nn.ConvTranspose2d(16, 8, 7,stride=2,padding=0,dilation=3), # (N,8,256,256
-            nn.Conv2d(8,1,4,stride=1,padding=1),
+            nn.LeakyReLU(),
+            nn.Conv2d(8,4,4,stride=1,padding=1),
+            nn.LeakyReLU(),
+            nn.Conv2d(4,1,7, stride=1, padding="same"),
             nn.Sigmoid()
         )
 
