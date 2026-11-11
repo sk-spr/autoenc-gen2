@@ -104,10 +104,10 @@ class EncNet(nn.Module):
             nn.ConvTranspose2d(16,16,11, stride=3,padding=0,dilation=2),
             nn.Conv2d(16,16,7, stride=1, padding=0), # (N,16,148,148)
             nn.LeakyReLU(),
-            nn.ConvTranspose2d(16, 8, 9,stride=2,padding=0,dilation=3),
-            nn.Conv2d(8,1,4,stride=1,padding=0),
+            nn.ConvTranspose2d(16, 8, 11,stride=2,padding=0,dilation=4),
+            nn.Conv2d(8,1,8,stride=1,padding=0),
             nn.Sigmoid(),
-            nn.ZeroPad2d(-2)
+            nn.ZeroPad2d(-8)
         )
 
     def forward(self, x: Tensor):
@@ -293,14 +293,14 @@ if __name__ == '__main__':
 
 
     loss_fn = DeviationCorrectedLoss(data_range=1, channel=1)
-    current_learning_rate = 1e-3
+    current_learning_rate = 1e-4
     batch_size = 128 # powers of two are generally useful, for reference: 64 batch_size * 10 num_workers fits easily in 8GB VRAM
     loss_hist = []
 
     # whether to create 16*6 mosaics every 16 batches (same images, usable as animation)
     make_animation_frames = False
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True, weight_decay=1e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True, weight_decay=5e-6)
     data_loader = torch.utils.data.DataLoader(
         HeightTileDataset(data_files, device),
         batch_size=batch_size,  # first dimension of matrices sent,
