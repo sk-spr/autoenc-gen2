@@ -104,10 +104,11 @@ class EncNet(nn.Module):
             nn.ConvTranspose2d(16,16,11, stride=3,padding=0,dilation=2),
             nn.Conv2d(16,16,7, stride=1, padding=0), # (N,16,148,148)
             nn.LeakyReLU(),
-            nn.ConvTranspose2d(16, 8, 11,stride=2,padding=0,dilation=4),
+            nn.Upsample((270, 270), mode='bilinear'),
+            nn.Conv2d(16,8,8,stride=1,padding=0),
+            nn.LeakyReLU(),
             nn.Conv2d(8,1,8,stride=1,padding=0),
             nn.Sigmoid(),
-            nn.ZeroPad2d(-8)
         )
 
     def forward(self, x: Tensor):
