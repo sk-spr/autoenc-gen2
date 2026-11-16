@@ -76,7 +76,7 @@ class HeightTileDataset(torch.utils.data.Dataset):
 
 image_size = 256 # image side length
 latent_dims = 2048 # ~= number of float32 values to compress into
-deep_n = 62*62 # width of hidden deep layers
+deep_n = 46*46 # width of hidden deep layers
 
 class EncNet(nn.Module):
     def __init__(self):
@@ -93,7 +93,7 @@ class EncNet(nn.Module):
             nn.LeakyReLU(),
             nn.BatchNorm2d(1),
             nn.Flatten(),
-            nn.Linear(deep_n, deep_n),
+            nn.Linear(62*62, deep_n),
             nn.LeakyReLU(),
             nn.Linear(deep_n, latent_dims),
             nn.LeakyReLU(),
@@ -104,7 +104,7 @@ class EncNet(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(deep_n, deep_n),
             nn.LeakyReLU(),
-            nn.Unflatten(1, (1,62,62)),
+            nn.Unflatten(1, (1,46,46)),
             nn.ConvTranspose2d(1,4,13),
             nn.LeakyReLU(),
             nn.ConvTranspose2d(4,8,11, dilation=2),
@@ -177,7 +177,7 @@ def train(dataloader: DataLoader[HeightTileDataset], mod: nn.Module, loss: nn.Mo
             if batch % 16 == 0 and animation:
                 im_batch = model(test_ims.squeeze(1).cuda())
                 save_collage([get_im(test_ims[im].squeeze(0).to(torch.float32)) for im in range(len(test_ims))], [get_im(im_batch[im].squeeze(0).to(torch.float32)) for im in range(len(test_ims))], batch // 4, f"vanity{epoch_num:02}")
-            if batch % 64 == 0:
+            if batch % 32 == 0:
                 if write_tensorboard:
                     preview_ims = [load_tile(data_files[random.randrange(0, len(data_files))], device) for im_i in
                                    range(3)]
@@ -218,6 +218,24 @@ def test(dataloader: DataLoader, mod: nn.Module, loss: nn.Module):
     #print(f"Avg loss: {test_loss:>8f}")
     return test_loss
 
+class EdgeLoss(torch.nn.MSELoss):
+    def __init__(self, margin_pixels = 16, resolution_x = 256, resolution_y = 256):
+        self.mask = torch.zeros((1, resolution_x, resolution_y), dtype=torch.float)
+        num_checked = 0
+        for y in range(resolution_y):
+            for x in range(resolution_x):
+                if x < margin_pixels or x > resolution_x - margin_pixels - 1 \
+                    or y < margin_pixels or y > resolution_y - margin_pixels - 1:
+                    self.mask[0,y,x] = 1.0
+                    num_checked += 1
+        self.ratio = num_checked / (resolution_x * resolution_y)
+
+        super(EdgeLoss, self).__init__()
+    def forward(self, input: Tensor, target: Tensor) -> Tensor:
+        masked_input = input * self.mask
+        masked_output = target * self.mask
+        return super(EdgeLoss, self).forward(masked_input, masked_output) * (1 - self.ratio)
+
 class DeviationCorrectedLoss(pytorch_msssim.SSIM):
     def __init__(
         self,
@@ -231,6 +249,7 @@ class DeviationCorrectedLoss(pytorch_msssim.SSIM):
     ):
         super(DeviationCorrectedLoss, self).__init__(data_range, True, win_size, win_sigma, channel, spatial_dims, K)
         self.mse_loss = nn.MSELoss()
+        self.edge_loss = EdgeLoss(32)
 
 
     def forward(self, X: Tensor, Y: Tensor) -> Tensor:
@@ -241,7 +260,7 @@ class DeviationCorrectedLoss(pytorch_msssim.SSIM):
         delta_mean = ((Y_mean - X_mean) ** 2) * 2
         #print(delta_mean.mean(), (((Y_mean - X_mean) * 5) ** 2).mean())
         delta_deviation = ((Y_deviation - X_deviation) * 10) ** 2
-        return 0.25 * ((1 - super(DeviationCorrectedLoss, self).forward(X.float(), Y.float())) * 2 + (self.mse_loss(X,Y) * 2) + delta_deviation.mean() + delta_mean.mean())
+        return 0.25 * ((1 - super(DeviationCorrectedLoss, self).forward(X.float(), Y.float())) * 2 + (self.mse_loss(X,Y)) + delta_deviation.mean() + delta_mean.mean() + self.edge_loss(X,Y) * 2)
 
 if __name__ == '__main__':
     CURR_FIGURE = None
@@ -253,8 +272,7 @@ if __name__ == '__main__':
     board_writer = SummaryWriter("./runs/")
 
     # set the glob expression for the input tif tiles
-    tile_folders = ["/home/skye/data/data/swit_tiles1/18/**/*.tif",
-                    "/home/skye/data/data/switzerland_tiles/18/**/*.tif"]
+    tile_folders = ["/home/landscapelab/Data/swiss_tiles/18/*/*.tif"]
     zoom_level = "**"
     data_files = []
     for glob_expr in tile_folders:
@@ -272,19 +290,19 @@ if __name__ == '__main__':
     torch.set_default_device(device)
 
     torch.cuda.empty_cache()
-    #model = EncNet().to(device)
+    model = EncNet().to(device)
 
     # uncomment and adjust path to load checkpointed model
-    model = torch.load("models/height21_ep0.pt2", weights_only=False).to(device)
+    #model = torch.load("models/height22_ep0.pt2", weights_only=False).to(device)
 
 
     loss_fn = DeviationCorrectedLoss(data_range=1, channel=1)
     current_learning_rate = 1e-3
-    batch_size = 128 # powers of two are generally useful, for reference: 64 batch_size * 10 num_workers fits easily in 8GB VRAM
+    batch_size = 256 # powers of two are generally useful, for reference: 64 batch_size * 10 num_workers fits easily in 8GB VRAM
     loss_hist = []
 
     # whether to create 16*6 mosaics every 16 batches (same images, usable as animation)
-    make_animation_frames = True
+    make_animation_frames = False
 
     optimizer = torch.optim.Adam(model.parameters(), lr=current_learning_rate, fused=True, weight_decay=1e-5)
     data_loader = torch.utils.data.DataLoader(
@@ -292,7 +310,7 @@ if __name__ == '__main__':
         batch_size=batch_size,  # first dimension of matrices sent,
         shuffle=True,  # randomize order
         generator=torch.Generator(device),  # load to GPU
-        num_workers=8, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
+        num_workers=14, # increase this until CPU utilisation is high or VRAM goes OOM; this is the number of preloading workers
         prefetch_factor=1,  # increase like num_workers, same reasons
         pin_memory=False,  # would not work with parallelisation...
         persistent_workers=True,
@@ -341,11 +359,11 @@ if __name__ == '__main__':
             board_writer.flush()
         # save full model (encode+decode, need class definition to load, but weights are saved)
         # should be 24.0MiB
-        torch.save(model, f"models/height21_ep{i}.pt2")
+        torch.save(model, f"models/height22_ep{i}.pt2")
 
         try:
             export = torch.export.export(model, (load_tile(fname, device), ))
-            torch.export.save(export, f"models/height21_ep{i}_export.pt2")
+            torch.export.save(export, f"models/height22_ep{i}_export.pt2")
         except Exception as e:
             print("Error exporting: ", e)
 
